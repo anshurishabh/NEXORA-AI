@@ -1,5 +1,7 @@
 const express = require('express');
 const router = express.Router();
+const pdfParse = require('pdf-parse');
+const mammoth = require('mammoth');
 const { runProvider } = require('../providers');
 
 const PROVIDER = 'groq';
@@ -13,6 +15,44 @@ const QA_PROMPT =
   'You are the Document Intelligence agent for NEXORA AI. Answer the question using only the provided ' +
   'document content. If the content is missing or insufficient, say so honestly rather than guessing. ' +
   'Keep the answer under 130 words. Respond in plain text only, no JSON, no markdown fences.';
+
+// Extracts real text from an uploaded PDF or DOCX file (sent as base64 from
+// the frontend) so the Document Intelligence agent has actual content to
+// work with, instead of just a filename.
+router.post('/extract', async (req, res) => {
+  const { filename, fileBase64 } = req.body || {};
+  if (!filename || !fileBase64) {
+    return res.status(400).json({ error: 'filename and fileBase64 are required' });
+  }
+
+  try {
+    const buffer = Buffer.from(fileBase64, 'base64');
+    const lower = filename.toLowerCase();
+    let text = '';
+
+    if (lower.endsWith('.pdf')) {
+      const data = await pdfParse(buffer);
+      text = (data.text || '').trim();
+    } else if (lower.endsWith('.docx')) {
+      const result = await mammoth.extractRawText({ buffer });
+      text = (result.value || '').trim();
+    } else {
+      return res.status(400).json({ error: 'Unsupported file type for extraction' });
+    }
+
+    if (!text) {
+      return res.json({
+        text: '',
+        warning: 'No selectable text was found in this file — it may be a scanned/image-only document.'
+      });
+    }
+
+    res.json({ text: text.slice(0, 20000) });
+  } catch (err) {
+    console.error('[documents/extract] failed for "' + filename + '":', err.message);
+    res.status(500).json({ error: 'Could not read that file: ' + err.message });
+  }
+});
 
 router.post('/summarize', async (req, res) => {
   const { text, filename } = req.body || {};

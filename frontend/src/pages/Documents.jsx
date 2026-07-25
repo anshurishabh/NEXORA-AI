@@ -11,6 +11,19 @@ function TypingDots() {
   );
 }
 
+function readFileAsBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      // reader.result looks like "data:application/pdf;base64,JVBERi0x..."
+      const base64 = reader.result.split(',')[1];
+      resolve(base64);
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
 export default function Documents() {
   const [fileName, setFileName] = useState(null);
   const [docText, setDocText] = useState(null);
@@ -31,28 +44,48 @@ export default function Documents() {
     setLoadingSummary(false);
   }
 
-  function handleFile(e) {
+  async function handleFile(e) {
     const file = e.target.files[0];
     if (!file) return;
     setFileName(file.name);
     setSummary('');
     setAnswer('');
     setQuestion('');
+    setDocText(null);
 
-    const isText = /\.(txt|md)$/i.test(file.name);
-    if (isText) {
+    const isPlainText = /\.(txt|md)$/i.test(file.name);
+    const isPdfOrDocx = /\.(pdf|docx)$/i.test(file.name);
+
+    if (isPlainText) {
       const reader = new FileReader();
       reader.onload = () => {
         setDocText(reader.result);
         runSummary(reader.result, file.name);
       };
       reader.readAsText(file);
-    } else {
-      setDocText(null);
-      setSummary(
-        "This file type requires full-document parsing (OCR / PDF or DOCX extraction), which isn't run in-browser here. Once connected to a parsing backend, the Document Intelligence agent would extract the title, key entities, and a structured summary here automatically."
-      );
+      return;
     }
+
+    if (isPdfOrDocx) {
+      setLoadingSummary(true);
+      try {
+        const fileBase64 = await readFileAsBase64(file);
+        const extracted = await api.extractDocument({ filename: file.name, fileBase64 });
+        if (extracted.warning) {
+          setSummary(extracted.warning);
+          setLoadingSummary(false);
+          return;
+        }
+        setDocText(extracted.text);
+        await runSummary(extracted.text, file.name);
+      } catch (err) {
+        setSummary("Couldn't read that file — " + err.message);
+        setLoadingSummary(false);
+      }
+      return;
+    }
+
+    setSummary('Unsupported file type. Please upload a .txt, .md, .pdf, or .docx file.');
   }
 
   async function handleAsk() {
@@ -75,8 +108,7 @@ export default function Documents() {
       <div className="page-pad">
         <h1 className="page-title">Document Intelligence</h1>
         <p className="page-desc">
-          Upload a document. Plain text / Markdown files are read and summarized live by the agent; other formats
-          show how parsing would flow once connected to a backend extractor.
+          Upload a .txt, .md, .pdf, or .docx file — the agent extracts the real text and summarizes it live.
         </p>
 
         <label className={'dropzone' + (fileName ? ' has-file' : '')}>

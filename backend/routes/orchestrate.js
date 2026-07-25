@@ -49,7 +49,7 @@ router.post('/', async (req, res) => {
 
   try {
     if (!isConfigured(PROVIDER)) {
-      const err = new Error('Groq API key is not set in backend/.env');
+      const err = new Error('GROQ_API_KEY is missing from backend/.env');
       err.code = 'NO_KEY';
       throw err;
     }
@@ -61,8 +61,21 @@ router.post('/', async (req, res) => {
       '{"agents": ["key1","key2"], "tasks": {"key1": "subtask text", "key2": "subtask text"}}. ' +
       'Pick between 1 and 4 truly relevant agents.';
 
-    const planRaw = await runProvider(PROVIDER, LEVEL, trimmedQuery, planPrompt);
-    const plan = parseJSON(planRaw);
+    let planRaw;
+    try {
+      planRaw = await runProvider(PROVIDER, LEVEL, trimmedQuery, planPrompt);
+    } catch (planErr) {
+      console.error('[orchestrate] PLANNING STEP FAILED:', planErr.message);
+      throw planErr;
+    }
+
+    let plan;
+    try {
+      plan = parseJSON(planRaw);
+    } catch (parseErr) {
+      console.error('[orchestrate] PLAN JSON PARSE FAILED. Raw output was:', planRaw);
+      throw new Error('Groq responded, but not in the expected JSON format. Raw: ' + planRaw.slice(0, 200));
+    }
 
     agents = (plan.agents || []).filter((a) => SELECTABLE_AGENTS.includes(a)).slice(0, 4);
     if (agents.length === 0) agents = ['research', 'content'];
@@ -84,7 +97,7 @@ router.post('/', async (req, res) => {
                 results.map((r, i) => (i + 1) + '. ' + r.title + ' — ' + r.snippet + ' (' + r.link + ')').join('\n');
             }
           } catch (e) {
-            // all search sources failed — agent falls back to its own knowledge below
+            console.error('[orchestrate] web search failed for "' + subtask + '":', e.message);
           }
         }
 
@@ -102,6 +115,7 @@ router.post('/', async (req, res) => {
           const output = await runProvider(PROVIDER, LEVEL, subtask + searchContext, agentSystemPrompt);
           return { agent: agentKey, provider: PROVIDER, output: output.trim(), ok: true };
         } catch (err) {
+          console.error('[orchestrate] AGENT "' + agentKey + '" FAILED:', err.message);
           return { agent: agentKey, provider: PROVIDER, output: null, ok: false, error: err.message };
         }
       })
@@ -109,7 +123,8 @@ router.post('/', async (req, res) => {
 
     const successful = agentTraces.filter((t) => t.ok && t.output);
     if (successful.length === 0) {
-      throw new Error('All specialist agents failed to respond — check the Groq API key in backend/.env.');
+      const firstReason = (agentTraces.find((t) => !t.ok) || {}).error || 'unknown error';
+      throw new Error('All specialist agents failed to respond. First error: ' + firstReason);
     }
 
     const synthesisInput = successful
@@ -124,6 +139,7 @@ router.post('/', async (req, res) => {
 
     responseText = (await runProvider(PROVIDER, LEVEL, 'Synthesize the final answer now.', synthesisPrompt)).trim();
   } catch (err) {
+    console.error('[orchestrate] REQUEST FAILED:', err.message);
     usedFallback = true;
     errorCode = err.code === 'NO_KEY' ? 'NO_KEY' : 'ERROR';
     if (agents.length === 0) agents = ['research', 'content'];

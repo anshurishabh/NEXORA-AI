@@ -28,6 +28,7 @@ export const api = {
   deleteConversation: (id) => request('/api/conversations/' + id, { method: 'DELETE' }),
   clearAllConversations: () => request('/api/conversations', { method: 'DELETE' }),
 
+  extractDocument: (body) => request('/api/document/extract', { method: 'POST', body: JSON.stringify(body) }),
   summarizeDocument: (body) => request('/api/document/summarize', { method: 'POST', body: JSON.stringify(body) }),
   askDocument: (body) => request('/api/document/ask', { method: 'POST', body: JSON.stringify(body) }),
 
