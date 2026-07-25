@@ -1,6 +1,5 @@
 import { useState } from 'react';
 import { api } from '../api.js';
-import { useApp } from '../context/AppContext.jsx';
 
 function TypingDots() {
   return (
@@ -13,7 +12,6 @@ function TypingDots() {
 }
 
 export default function Documents() {
-  const { providers } = useApp();
   const [fileName, setFileName] = useState(null);
   const [docText, setDocText] = useState(null);
   const [summary, setSummary] = useState('');
@@ -22,12 +20,10 @@ export default function Documents() {
   const [answer, setAnswer] = useState('');
   const [loadingAnswer, setLoadingAnswer] = useState(false);
 
-  const activeProvider = providers.find((p) => p.configured)?.id || 'gemini';
-
   async function runSummary(text, name) {
     setLoadingSummary(true);
     try {
-      const data = await api.summarizeDocument({ text, filename: name, provider: activeProvider, level: 'normal' });
+      const data = await api.summarizeDocument({ text, filename: name });
       setSummary(data.summary);
     } catch (err) {
       setSummary('Summary unavailable — ' + err.message);
@@ -66,7 +62,7 @@ export default function Documents() {
     const q = question;
     setQuestion('');
     try {
-      const data = await api.askDocument({ text: docText, filename: fileName, question: q, provider: activeProvider, level: 'normal' });
+      const data = await api.askDocument({ text: docText, filename: fileName, question: q });
       setAnswer(data.answer);
     } catch (err) {
       setAnswer("Couldn't reach the backend — " + err.message);

@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { api } from '../api.js';
 import { useApp } from '../context/AppContext.jsx';
-import { AGENT_CONFIG, LEVEL_LABEL, LEVEL_ORDER } from '../constants.js';
+import { AGENT_CONFIG } from '../constants.js';
 
 const SUGGESTIONS = [
   { label: 'Research: EV market in India', prompt: 'Research the electric vehicle market in India and summarize the key trends' },
@@ -28,9 +28,9 @@ export default function Console() {
   const [stage, setStage] = useState(0);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [expanded, setExpanded] = useState({});
-  const [provider, setProvider] = useState('groq');
-  const [level, setLevel] = useState('normal');
   const scrollRef = useRef(null);
+
+  const groq = providers.find((p) => p.id === 'groq');
 
   const loadConversations = useCallback(async () => {
     try {
@@ -81,18 +81,6 @@ export default function Console() {
     }
   }
 
-  const providerData = providers.find((p) => p.id === provider);
-  const availableLevels = providerData ? LEVEL_ORDER.filter((l) => providerData.levels[l]) : [];
-
-  function changeProvider(id) {
-    setProvider(id);
-    setLevel('normal');
-  }
-
-  function providerLabel(id) {
-    return providers.find((p) => p.id === id)?.name || id;
-  }
-
   function toggleExpanded(i) {
     setExpanded((prev) => ({ ...prev, [i]: !prev[i] }));
   }
@@ -106,7 +94,7 @@ export default function Console() {
     setStage(0);
     setMessages((prev) => [...prev, { role: 'user', content: text, time: new Date().toISOString() }]);
 
-    const requestPromise = api.orchestrate({ conversationId: activeId, query: text, provider, level });
+    const requestPromise = api.orchestrate({ conversationId: activeId, query: text });
 
     await sleep(500);
     setStage(1);
@@ -131,7 +119,7 @@ export default function Console() {
     const traces =
       result.agentTraces && result.agentTraces.length
         ? result.agentTraces
-        : agents.map((a) => ({ agent: a, provider, ok: true }));
+        : agents.map((a) => ({ agent: a, provider: 'groq', ok: true }));
 
     setMessages((prev) => [...prev, { role: 'assistant', content: result.response, agents, agentTraces: traces }]);
     setActiveId(result.conversationId);
@@ -199,7 +187,7 @@ export default function Console() {
               </h2>
               <p>
                 Describe what you need. NEXORA's orchestrator will plan the task, delegate it to the right
-                specialist agents — each on its own AI provider — and verify the result before responding.
+                specialist agents, and verify the result before responding.
               </p>
               <div className="chips">
                 {SUGGESTIONS.map((s) => (
@@ -224,16 +212,12 @@ export default function Console() {
                     </button>
                     {expanded[i] && (
                       <div className="agent-trace-chips">
-                        {m.agents.map((a) => {
-                          const trace = (m.agentTraces || []).find((t) => t.agent === a);
-                          return (
-                            <span className="trace-chip" key={a}>
-                              <span className="trace-chip-icon">{AGENT_CONFIG[a]?.icon}</span>
-                              {AGENT_CONFIG[a]?.label}
-                              {trace && <span className="trace-chip-provider"> · {providerLabel(trace.provider)}</span>}
-                            </span>
-                          );
-                        })}
+                        {m.agents.map((a) => (
+                          <span className="trace-chip" key={a}>
+                            <span className="trace-chip-icon">{AGENT_CONFIG[a]?.icon}</span>
+                            {AGENT_CONFIG[a]?.label}
+                          </span>
+                        ))}
                       </div>
                     )}
                   </div>
@@ -261,24 +245,9 @@ export default function Console() {
 
         <div className="model-bar">
           <span className="model-bar-label">MODEL</span>
-          <select className="model-select" value={provider} onChange={(e) => changeProvider(e.target.value)}>
-            {providers.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-          </select>
-          {availableLevels.length > 1 && (
-            <select className="model-select" value={level} onChange={(e) => setLevel(e.target.value)}>
-              {availableLevels.map((l) => (
-                <option key={l} value={l}>
-                  {LEVEL_LABEL[l]} · {providerData.levels[l].label}
-                </option>
-              ))}
-            </select>
-          )}
-          <span className={'model-bar-status ' + (providerData?.configured ? 'ok' : 'warn')}>
-            {providerData?.configured ? '● Ready' : '○ No key — add it to backend/.env'}
+          <span className="model-bar-fixed">Groq</span>
+          <span className={'model-bar-status ' + (groq?.configured ? 'ok' : 'warn')}>
+            {groq?.configured ? '● Ready' : '○ No key — add GROQ_API_KEY to backend/.env'}
           </span>
         </div>
 

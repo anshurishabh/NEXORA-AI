@@ -1,12 +1,13 @@
 const express = require('express');
 const router = express.Router();
-const { runProvider, isConfigured, PROVIDERS } = require('../providers');
+const { runProvider, isConfigured } = require('../providers');
 const { readDB, writeDB } = require('../db');
 const AGENT_INFO = require('../agentConfig');
 const webSearch = require('../webSearch');
 
 const SELECTABLE_AGENTS = ['research', 'coding', 'data', 'document', 'websearch', 'content'];
-const ALL_PROVIDER_IDS = ['groq', 'cerebras', 'openrouter', 'mistral'];
+const PROVIDER = 'groq';
+const LEVEL = 'normal';
 
 function makeId() {
   return 'conv_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
@@ -17,46 +18,14 @@ function parseJSON(text) {
   return JSON.parse(clean);
 }
 
-function providerName(id) {
-  return (PROVIDERS[id] && PROVIDERS[id].name) || id;
-}
-
-// Tries the preferred provider first. If it fails (bad key, auth error, rate
-// limit, provider outage — anything), it silently moves to the next
-// configured provider and tries again, until one succeeds or all fail.
-async function runWithFallback(preferredProviderId, levelKey, query, systemPrompt) {
-  const order = [preferredProviderId, ...ALL_PROVIDER_IDS.filter((p) => p !== preferredProviderId)];
-  const failed = [];
-  let lastError = null;
-
-  for (const providerId of order) {
-    if (!isConfigured(providerId)) continue;
-    try {
-      const output = await runProvider(providerId, levelKey, query, systemPrompt);
-      return { output, provider: providerId, failed };
-    } catch (err) {
-      failed.push({ provider: providerId, error: err.message });
-      lastError = err;
-    }
-  }
-
-  const err = new Error(lastError ? lastError.message : 'No provider is configured with an API key.');
-  err.code = lastError ? lastError.code : 'NO_KEY';
-  err.failed = failed;
-  throw err;
-}
-
 router.post('/', async (req, res) => {
-  const { conversationId, query, provider, level } = req.body || {};
+  const { conversationId, query } = req.body || {};
 
   if (!query || typeof query !== 'string' || !query.trim()) {
     return res.status(400).json({ error: 'query is required' });
   }
 
-  const primaryProvider = provider || 'groq';
-  const levelKey = level || 'normal';
   const trimmedQuery = query.trim();
-
   const db = readDB();
 
   let convo = conversationId ? db.conversations.find((c) => c.id === conversationId) : null;
@@ -77,15 +46,14 @@ router.post('/', async (req, res) => {
   let responseText = '';
   let usedFallback = false;
   let errorCode = null;
-  const fallbackPairs = new Set();
-
-  function recordFallback(failedList, actualProvider) {
-    (failedList || []).forEach((f) => {
-      fallbackPairs.add(providerName(f.provider) + '>' + providerName(actualProvider));
-    });
-  }
 
   try {
+    if (!isConfigured(PROVIDER)) {
+      const err = new Error('Groq API key is not set in backend/.env');
+      err.code = 'NO_KEY';
+      throw err;
+    }
+
     const planPrompt =
       'You are the planning agent for NEXORA AI. Decide which specialist agents from this fixed set are genuinely ' +
       'needed: research, coding, data, document, websearch, content. For each agent you pick, write ONE short, ' +
@@ -93,9 +61,8 @@ router.post('/', async (req, res) => {
       '{"agents": ["key1","key2"], "tasks": {"key1": "subtask text", "key2": "subtask text"}}. ' +
       'Pick between 1 and 4 truly relevant agents.';
 
-    const planResult = await runWithFallback(primaryProvider, levelKey, trimmedQuery, planPrompt);
-    recordFallback(planResult.failed, planResult.provider);
-    const plan = parseJSON(planResult.output);
+    const planRaw = await runProvider(PROVIDER, LEVEL, trimmedQuery, planPrompt);
+    const plan = parseJSON(planRaw);
 
     agents = (plan.agents || []).filter((a) => SELECTABLE_AGENTS.includes(a)).slice(0, 4);
     if (agents.length === 0) agents = ['research', 'content'];
@@ -110,7 +77,7 @@ router.post('/', async (req, res) => {
         let searchContext = '';
         if (needsSearch) {
           try {
-            const results = await webSearch(subtask, 5);
+            const results = await webSearch(subtask, 6);
             if (results.length) {
               searchContext =
                 '\n\nLIVE WEB SEARCH RESULTS (use these for current facts, news, and dates):\n' +
@@ -124,7 +91,7 @@ router.post('/', async (req, res) => {
         const todayLine = needsSearch
           ? ' Today\u2019s date is ' +
             new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }) +
-            '. Use the live web search results provided below for current, up-to-date information — do not say your knowledge has a cutoff.'
+            '. Use the live web search results provided below for current, up-to-date information — do not say your knowledge has a cutoff. If the results are limited, share what they do say and note that more specific details may be developing.'
           : '';
         const agentSystemPrompt =
           'You are the ' + info.label + ' agent for NEXORA AI. ' + info.desc +
@@ -132,23 +99,21 @@ router.post('/', async (req, res) => {
           todayLine +
           ' Respond in plain text only — no JSON, no markdown fences.';
         try {
-          const result = await runWithFallback(primaryProvider, levelKey, subtask + searchContext, agentSystemPrompt);
-          recordFallback(result.failed, result.provider);
-          return { agent: agentKey, provider: result.provider, output: result.output.trim(), ok: true };
+          const output = await runProvider(PROVIDER, LEVEL, subtask + searchContext, agentSystemPrompt);
+          return { agent: agentKey, provider: PROVIDER, output: output.trim(), ok: true };
         } catch (err) {
-          recordFallback(err.failed, 'none — all providers failed');
-          return { agent: agentKey, provider: primaryProvider, output: null, ok: false, error: err.message };
+          return { agent: agentKey, provider: PROVIDER, output: null, ok: false, error: err.message };
         }
       })
     );
 
     const successful = agentTraces.filter((t) => t.ok && t.output);
     if (successful.length === 0) {
-      throw new Error('All specialist agents failed to respond — check provider keys in Settings.');
+      throw new Error('All specialist agents failed to respond — check the Groq API key in backend/.env.');
     }
 
     const synthesisInput = successful
-      .map((t) => '[' + AGENT_INFO[t.agent].label.toUpperCase() + ' via ' + t.provider + ']\n' + t.output)
+      .map((t) => '[' + AGENT_INFO[t.agent].label.toUpperCase() + ']\n' + t.output)
       .join('\n\n');
 
     const synthesisPrompt =
@@ -157,24 +122,14 @@ router.post('/', async (req, res) => {
       'well-organized, non-redundant final answer. Keep it under 200 words. You may use **bold** sparingly. ' +
       'Respond in plain text only — no JSON, no markdown fences.\n\n' + synthesisInput;
 
-    const synthResult = await runWithFallback(primaryProvider, levelKey, 'Synthesize the final answer now.', synthesisPrompt);
-    recordFallback(synthResult.failed, synthResult.provider);
-    responseText = synthResult.output.trim();
-
-    if (fallbackPairs.size > 0) {
-      const notes = Array.from(fallbackPairs).map((pair) => {
-        const [failedName, usedName] = pair.split('>');
-        return failedName + ' didn\u2019t respond, so ' + usedName + ' was used instead';
-      });
-      responseText += '\n\n_Note: ' + notes.join('; ') + '._';
-    }
+    responseText = (await runProvider(PROVIDER, LEVEL, 'Synthesize the final answer now.', synthesisPrompt)).trim();
   } catch (err) {
     usedFallback = true;
     errorCode = err.code === 'NO_KEY' ? 'NO_KEY' : 'ERROR';
     if (agents.length === 0) agents = ['research', 'content'];
     responseText =
       errorCode === 'NO_KEY'
-        ? 'None of your configured providers could handle this request right now. Please check your API keys in backend/.env and restart the server.'
+        ? 'Groq needs an API key in backend/.env. Add GROQ_API_KEY, restart the server, and try again.'
         : "I couldn't complete this task right now (" + err.message + '). Please try again in a moment.';
   }
 
