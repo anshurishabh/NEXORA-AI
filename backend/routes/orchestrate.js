@@ -1,12 +1,12 @@
 const express = require('express');
 const router = express.Router();
-const { runProvider, isConfigured } = require('../providers');
+const { runProvider, isConfigured, PROVIDERS } = require('../providers');
 const { readDB, writeDB } = require('../db');
 const AGENT_INFO = require('../agentConfig');
 const webSearch = require('../webSearch');
 
 const SELECTABLE_AGENTS = ['research', 'coding', 'data', 'document', 'websearch', 'content'];
-const ALL_PROVIDER_IDS = ['gemini', 'groq', 'cerebras', 'openrouter', 'mistral'];
+const ALL_PROVIDER_IDS = ['groq', 'cerebras', 'openrouter', 'mistral'];
 
 function makeId() {
   return 'conv_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
@@ -17,13 +17,33 @@ function parseJSON(text) {
   return JSON.parse(clean);
 }
 
-// Every agent now runs on the single provider selected in the Console — no
-// more per-agent Settings routing map. Falls back to any configured provider
-// only if the Console-selected one has no key set.
-function resolveProvider(primaryProvider) {
-  if (isConfigured(primaryProvider)) return primaryProvider;
-  const anyConfigured = ALL_PROVIDER_IDS.find((p) => isConfigured(p));
-  return anyConfigured || primaryProvider;
+function providerName(id) {
+  return (PROVIDERS[id] && PROVIDERS[id].name) || id;
+}
+
+// Tries the preferred provider first. If it fails (bad key, auth error, rate
+// limit, provider outage — anything), it silently moves to the next
+// configured provider and tries again, until one succeeds or all fail.
+async function runWithFallback(preferredProviderId, levelKey, query, systemPrompt) {
+  const order = [preferredProviderId, ...ALL_PROVIDER_IDS.filter((p) => p !== preferredProviderId)];
+  const failed = [];
+  let lastError = null;
+
+  for (const providerId of order) {
+    if (!isConfigured(providerId)) continue;
+    try {
+      const output = await runProvider(providerId, levelKey, query, systemPrompt);
+      return { output, provider: providerId, failed };
+    } catch (err) {
+      failed.push({ provider: providerId, error: err.message });
+      lastError = err;
+    }
+  }
+
+  const err = new Error(lastError ? lastError.message : 'No provider is configured with an API key.');
+  err.code = lastError ? lastError.code : 'NO_KEY';
+  err.failed = failed;
+  throw err;
 }
 
 router.post('/', async (req, res) => {
@@ -33,7 +53,7 @@ router.post('/', async (req, res) => {
     return res.status(400).json({ error: 'query is required' });
   }
 
-  const primaryProvider = provider || 'gemini';
+  const primaryProvider = provider || 'groq';
   const levelKey = level || 'normal';
   const trimmedQuery = query.trim();
 
@@ -57,6 +77,13 @@ router.post('/', async (req, res) => {
   let responseText = '';
   let usedFallback = false;
   let errorCode = null;
+  const fallbackPairs = new Set();
+
+  function recordFallback(failedList, actualProvider) {
+    (failedList || []).forEach((f) => {
+      fallbackPairs.add(providerName(f.provider) + '>' + providerName(actualProvider));
+    });
+  }
 
   try {
     const planPrompt =
@@ -66,20 +93,16 @@ router.post('/', async (req, res) => {
       '{"agents": ["key1","key2"], "tasks": {"key1": "subtask text", "key2": "subtask text"}}. ' +
       'Pick between 1 and 4 truly relevant agents.';
 
-    const planProvider = resolveProvider(primaryProvider);
-    const planRaw = await runProvider(planProvider, levelKey, trimmedQuery, planPrompt);
-    const plan = parseJSON(planRaw);
+    const planResult = await runWithFallback(primaryProvider, levelKey, trimmedQuery, planPrompt);
+    recordFallback(planResult.failed, planResult.provider);
+    const plan = parseJSON(planResult.output);
 
     agents = (plan.agents || []).filter((a) => SELECTABLE_AGENTS.includes(a)).slice(0, 4);
     if (agents.length === 0) agents = ['research', 'content'];
     const tasks = plan.tasks || {};
 
-    // Every agent runs on the SAME Console-selected provider. Research / Web Search
-    // agents additionally get live DuckDuckGo results injected as context — works
-    // for every provider, not just Gemini.
     agentTraces = await Promise.all(
       agents.map(async (agentKey) => {
-        const providerId = resolveProvider(primaryProvider);
         const info = AGENT_INFO[agentKey];
         const subtask = tasks[agentKey] || trimmedQuery;
         const needsSearch = agentKey === 'research' || agentKey === 'websearch';
@@ -94,7 +117,7 @@ router.post('/', async (req, res) => {
                 results.map((r, i) => (i + 1) + '. ' + r.title + ' — ' + r.snippet + ' (' + r.link + ')').join('\n');
             }
           } catch (e) {
-            // Search failed silently — agent falls back to its own knowledge below.
+            // all search sources failed — agent falls back to its own knowledge below
           }
         }
 
@@ -109,12 +132,12 @@ router.post('/', async (req, res) => {
           todayLine +
           ' Respond in plain text only — no JSON, no markdown fences.';
         try {
-          const output = await runProvider(providerId, levelKey, subtask + searchContext, agentSystemPrompt, {
-            useSearch: needsSearch
-          });
-          return { agent: agentKey, provider: providerId, output: output.trim(), ok: true };
+          const result = await runWithFallback(primaryProvider, levelKey, subtask + searchContext, agentSystemPrompt);
+          recordFallback(result.failed, result.provider);
+          return { agent: agentKey, provider: result.provider, output: result.output.trim(), ok: true };
         } catch (err) {
-          return { agent: agentKey, provider: providerId, output: null, ok: false, error: err.message };
+          recordFallback(err.failed, 'none — all providers failed');
+          return { agent: agentKey, provider: primaryProvider, output: null, ok: false, error: err.message };
         }
       })
     );
@@ -134,16 +157,24 @@ router.post('/', async (req, res) => {
       'well-organized, non-redundant final answer. Keep it under 200 words. You may use **bold** sparingly. ' +
       'Respond in plain text only — no JSON, no markdown fences.\n\n' + synthesisInput;
 
-    responseText = (
-      await runProvider(resolveProvider(primaryProvider), levelKey, 'Synthesize the final answer now.', synthesisPrompt)
-    ).trim();
+    const synthResult = await runWithFallback(primaryProvider, levelKey, 'Synthesize the final answer now.', synthesisPrompt);
+    recordFallback(synthResult.failed, synthResult.provider);
+    responseText = synthResult.output.trim();
+
+    if (fallbackPairs.size > 0) {
+      const notes = Array.from(fallbackPairs).map((pair) => {
+        const [failedName, usedName] = pair.split('>');
+        return failedName + ' didn\u2019t respond, so ' + usedName + ' was used instead';
+      });
+      responseText += '\n\n_Note: ' + notes.join('; ') + '._';
+    }
   } catch (err) {
     usedFallback = true;
     errorCode = err.code === 'NO_KEY' ? 'NO_KEY' : 'ERROR';
     if (agents.length === 0) agents = ['research', 'content'];
     responseText =
       errorCode === 'NO_KEY'
-        ? 'The "' + primaryProvider + '" provider needs an API key in backend/.env. Add it, restart the server, and try again — or switch providers in the model bar.'
+        ? 'None of your configured providers could handle this request right now. Please check your API keys in backend/.env and restart the server.'
         : "I couldn't complete this task right now (" + err.message + '). Please try again in a moment.';
   }
 

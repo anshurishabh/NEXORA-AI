@@ -28,7 +28,7 @@ export default function Console() {
   const [stage, setStage] = useState(0);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [expanded, setExpanded] = useState({});
-  const [provider, setProvider] = useState('gemini');
+  const [provider, setProvider] = useState('groq');
   const [level, setLevel] = useState('normal');
   const scrollRef = useRef(null);
 

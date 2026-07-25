@@ -18,7 +18,7 @@ router.post('/summarize', async (req, res) => {
     (text ? String(text).slice(0, 6000) : '[No extractable text was provided for this file type]');
 
   try {
-    const raw = await runProvider(provider || 'anthropic', level || 'normal', content, SUMMARY_PROMPT);
+    const raw = await runProvider(provider || 'groq', level || 'normal', content, SUMMARY_PROMPT);
     res.json({ summary: raw.trim() });
   } catch (err) {
     res.status(err.code === 'NO_KEY' ? 400 : 502).json({ error: err.message || 'Failed to summarize document' });
@@ -36,7 +36,7 @@ router.post('/ask', async (req, res) => {
     '\n\nQUESTION: ' + question;
 
   try {
-    const raw = await runProvider(provider || 'anthropic', level || 'normal', content, QA_PROMPT);
+    const raw = await runProvider(provider || 'groq', level || 'normal', content, QA_PROMPT);
     res.json({ answer: raw.trim() });
   } catch (err) {
     res.status(err.code === 'NO_KEY' ? 400 : 502).json({ error: err.message || 'Failed to answer question' });

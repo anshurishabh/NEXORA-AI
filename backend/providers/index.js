@@ -1,18 +1,9 @@
 const callOpenAICompatible = require('./openaiCompatible');
 
-// Verified against each provider's docs as of Jul 2026. All five are free-tier.
+// Verified against each provider's docs as of Jul 2026. All are free-tier.
 // Free-tier lineups (especially OpenRouter's) rotate — if a model 404s, check
 // the provider's current model list and update the id below.
 const PROVIDERS = {
-  gemini: {
-    name: 'Google Gemini',
-    envKey: 'GEMINI_API_KEY',
-    levels: {
-      fast: { model: 'gemini-3.5-flash-lite', label: '3.5 Flash-Lite' },
-      medium: { model: 'gemini-3-flash', label: '3 Flash' },
-      normal: { model: 'gemini-3.6-flash', label: '3.6 Flash' }
-    }
-  },
   groq: {
     name: 'Groq',
     envKey: 'GROQ_API_KEY',
@@ -72,7 +63,6 @@ function pickLevel(provider, levelKey) {
 }
 
 async function runProvider(providerId, levelKey, query, systemPrompt, options) {
-  const opts = options || {};
   const provider = PROVIDERS[providerId];
   if (!provider) {
     const err = new Error('Unknown provider: ' + providerId);
@@ -89,34 +79,6 @@ async function runProvider(providerId, levelKey, query, systemPrompt, options) {
 
   const levelCfg = pickLevel(provider, levelKey);
   const prompt = systemPrompt || ORCH_SYSTEM_PROMPT;
-
-  if (providerId === 'gemini') {
-    const body = {
-      systemInstruction: { parts: [{ text: prompt }] },
-      contents: [{ role: 'user', parts: [{ text: query }] }]
-    };
-    if (opts.useSearch) {
-      body.tools = [{ google_search: {} }];
-    }
-    // Uses the "x-goog-api-key" header — Google's current recommended auth
-    // method, works with both old AIza Standard keys and newer AQ. Auth keys.
-    const res = await fetch(
-      'https://generativelanguage.googleapis.com/v1beta/models/' + levelCfg.model + ':generateContent',
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-goog-api-key': apiKey
-        },
-        body: JSON.stringify(body)
-      }
-    );
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error((data.error && data.error.message) || 'Gemini request failed');
-    const parts =
-      (data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts) || [];
-    return parts.map((p) => p.text || '').join('');
-  }
 
   if (providerId === 'groq') {
     return callOpenAICompatible('https://api.groq.com/openai/v1/chat/completions', levelCfg.model, apiKey, query, prompt);
