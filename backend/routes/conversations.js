@@ -1,0 +1,66 @@
+const express = require('express');
+const router = express.Router();
+const { readDB, writeDB } = require('../db');
+
+function makeId() {
+  return 'conv_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+}
+
+// GET /api/conversations — lightweight list for the sidebar
+router.get('/', (req, res) => {
+  const db = readDB();
+  const list = db.conversations
+    .slice()
+    .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt))
+    .map((c) => ({
+      id: c.id,
+      title: c.title,
+      createdAt: c.createdAt,
+      updatedAt: c.updatedAt,
+      messageCount: c.messages.length
+    }));
+  res.json({ conversations: list });
+});
+
+// DELETE /api/conversations — clear everything (must be defined before the /:id route)
+router.delete('/', (req, res) => {
+  const db = readDB();
+  db.conversations = [];
+  writeDB(db);
+  res.json({ ok: true });
+});
+
+// GET /api/conversations/:id — full message history for one chat
+router.get('/:id', (req, res) => {
+  const db = readDB();
+  const convo = db.conversations.find((c) => c.id === req.params.id);
+  if (!convo) return res.status(404).json({ error: 'Conversation not found' });
+  res.json({ conversation: convo });
+});
+
+// POST /api/conversations — create an empty chat (used by "+ New Chat")
+router.post('/', (req, res) => {
+  const db = readDB();
+  const convo = {
+    id: makeId(),
+    title: (req.body && req.body.title) || 'New chat',
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    messages: []
+  };
+  db.conversations.unshift(convo);
+  writeDB(db);
+  res.json({ conversation: convo });
+});
+
+// DELETE /api/conversations/:id — remove one chat
+router.delete('/:id', (req, res) => {
+  const db = readDB();
+  const idx = db.conversations.findIndex((c) => c.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'Conversation not found' });
+  db.conversations.splice(idx, 1);
+  writeDB(db);
+  res.json({ ok: true });
+});
+
+module.exports = router;

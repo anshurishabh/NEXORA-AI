@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+
+# Environment variables — never commit real keys
+.env
+.env.local
+
+# Build output
+dist/
+build/
+
+# Saved chat data (local dev)
+backend/data/db.json
+
+# Editor / OS
+.DS_Store
+.vscode/*
+!.vscode/extensions.json
+*.log
