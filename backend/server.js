@@ -9,6 +9,7 @@ const documentsRoute = require('./routes/documents');
 const providersRoute = require('./routes/providers');
 const analyticsRoute = require('./routes/analytics');
 const imageRoute = require('./routes/image');
+const codeRoute = require('./routes/code');
 const { readDB } = require('./db');
 
 const app = express();
@@ -28,6 +29,7 @@ app.use('/api/document', documentsRoute);
 app.use('/api/providers', providersRoute);
 app.use('/api/analytics', analyticsRoute);
 app.use('/api/image', imageRoute);
+app.use('/api/code', codeRoute);
 
 app.get('/api/export', (req, res) => {
   const db = readDB();

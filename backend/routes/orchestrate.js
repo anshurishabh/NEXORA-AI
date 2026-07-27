@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { runProvider, isConfigured } = require('../providers');
+const { runProvider, isConfigured, streamProvider } = require('../providers');
 const { readDB, writeDB } = require('../db');
 const AGENT_INFO = require('../agentConfig');
 const webSearch = require('../webSearch');
@@ -18,6 +18,93 @@ function parseJSON(text) {
   return JSON.parse(clean);
 }
 
+// Shared by both the normal and streaming routes: plans which agents are
+// needed, then runs them all in parallel (with live web search where relevant).
+async function planAndDelegate(effectiveQuery, hasDocument) {
+  const planPrompt =
+    'You are the planning agent for NEXORA AI. Decide which specialist agents from this fixed set are genuinely ' +
+    'needed: research, coding, data, document, websearch, content. For each agent you pick, write ONE short, ' +
+    'specific subtask instruction for it. Respond with ONLY valid JSON, no markdown fences: ' +
+    '{"agents": ["key1","key2"], "tasks": {"key1": "subtask text", "key2": "subtask text"}}. ' +
+    'Pick between 1 and 4 truly relevant agents.' +
+    (hasDocument ? ' A document was attached, so include the "document" agent.' : '');
+
+  let planRaw;
+  try {
+    planRaw = await runProvider(PROVIDER, LEVEL, effectiveQuery, planPrompt);
+  } catch (planErr) {
+    console.error('[orchestrate] PLANNING STEP FAILED:', planErr.message);
+    throw planErr;
+  }
+
+  let plan;
+  try {
+    plan = parseJSON(planRaw);
+  } catch (parseErr) {
+    console.error('[orchestrate] PLAN JSON PARSE FAILED. Raw output was:', planRaw);
+    throw new Error('Groq responded, but not in the expected JSON format. Raw: ' + planRaw.slice(0, 200));
+  }
+
+  let agents = (plan.agents || []).filter((a) => SELECTABLE_AGENTS.includes(a)).slice(0, 4);
+  if (agents.length === 0) agents = hasDocument ? ['document', 'content'] : ['research', 'content'];
+  const tasks = plan.tasks || {};
+
+  const agentTraces = await Promise.all(
+    agents.map(async (agentKey) => {
+      const info = AGENT_INFO[agentKey];
+      const subtask = tasks[agentKey] || effectiveQuery;
+      const needsSearch = agentKey === 'research' || agentKey === 'websearch';
+
+      let searchContext = '';
+      if (needsSearch) {
+        try {
+          const results = await webSearch(subtask, 6);
+          if (results.length) {
+            searchContext =
+              '\n\nLIVE WEB SEARCH RESULTS (use these for current facts, news, and dates):\n' +
+              results.map((r, i) => (i + 1) + '. ' + r.title + ' — ' + r.snippet + ' (' + r.link + ')').join('\n');
+          }
+        } catch (e) {
+          console.error('[orchestrate] web search failed for "' + subtask + '":', e.message);
+        }
+      }
+
+      const todayLine = needsSearch
+        ? ' Today\u2019s date is ' +
+          new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }) +
+          '. Use the live web search results provided below for current, up-to-date information — do not say your knowledge has a cutoff.'
+        : '';
+      const agentSystemPrompt =
+        'You are the ' + info.label + ' agent for NEXORA AI. ' + info.desc +
+        ' Complete this subtask as part of a larger collaborative answer. Be concise and concrete (under 120 words).' +
+        todayLine +
+        ' Respond in plain text only — no JSON, no markdown fences.';
+      try {
+        const output = await runProvider(PROVIDER, LEVEL, subtask + searchContext, agentSystemPrompt);
+        return { agent: agentKey, provider: PROVIDER, output: output.trim(), ok: true };
+      } catch (err) {
+        console.error('[orchestrate] AGENT "' + agentKey + '" FAILED:', err.message);
+        return { agent: agentKey, provider: PROVIDER, output: null, ok: false, error: err.message };
+      }
+    })
+  );
+
+  return { agents, agentTraces };
+}
+
+function buildSynthesisPrompt(originalGoal, successful) {
+  const synthesisInput = successful
+    .map((t) => '[' + AGENT_INFO[t.agent].label.toUpperCase() + ']\n' + t.output)
+    .join('\n\n');
+  return (
+    'You are the Verifier agent for NEXORA AI. Specialist agents have each contributed a piece toward the ' +
+    'user\u2019s original goal: "' + originalGoal.slice(0, 300) + '". Combine their contributions below into one clear, ' +
+    'well-organized, non-redundant final answer. Keep it under 200 words. You may use **bold** sparingly. ' +
+    'Respond in plain text only — no JSON, no markdown fences.\n\n' + synthesisInput
+  );
+}
+
+// ─── Normal (non-streaming) route — supports text, image, and document attachments ───
 router.post('/', async (req, res) => {
   const { conversationId, query, attachment } = req.body || {};
 
@@ -62,8 +149,6 @@ router.post('/', async (req, res) => {
       throw err;
     }
 
-    // IMAGE ATTACHED — single vision call, skip the multi-agent planning
-    // (planning/JSON-mode doesn't apply well to "look at this picture").
     if (hasImage) {
       const visionPrompt =
         'You are the Vision agent for NEXORA AI. Look at the attached image carefully and respond helpfully ' +
@@ -77,82 +162,15 @@ router.post('/', async (req, res) => {
       agents = ['content'];
       agentTraces = [{ agent: 'content', provider: PROVIDER, ok: true, output: responseText }];
     } else {
-      // DOCUMENT ATTACHED (or no attachment) — normal multi-agent flow.
-      // If a document was attached, its extracted text is folded into the
-      // query so every agent (planner, research, etc.) can see it.
       const effectiveQuery = hasDocument
         ? 'The user attached a document named "' + attachment.name + '". Document content:\n' +
           (attachment.text ? attachment.text.slice(0, 6000) : '[No extractable text was found in this file]') +
           '\n\nUser request: ' + (trimmedQuery || 'Summarize this document and highlight anything important.')
         : trimmedQuery;
 
-      const planPrompt =
-        'You are the planning agent for NEXORA AI. Decide which specialist agents from this fixed set are genuinely ' +
-        'needed: research, coding, data, document, websearch, content. For each agent you pick, write ONE short, ' +
-        'specific subtask instruction for it. Respond with ONLY valid JSON, no markdown fences: ' +
-        '{"agents": ["key1","key2"], "tasks": {"key1": "subtask text", "key2": "subtask text"}}. ' +
-        'Pick between 1 and 4 truly relevant agents.' +
-        (hasDocument ? ' A document was attached, so include the "document" agent.' : '');
-
-      let planRaw;
-      try {
-        planRaw = await runProvider(PROVIDER, LEVEL, effectiveQuery, planPrompt);
-      } catch (planErr) {
-        console.error('[orchestrate] PLANNING STEP FAILED:', planErr.message);
-        throw planErr;
-      }
-
-      let plan;
-      try {
-        plan = parseJSON(planRaw);
-      } catch (parseErr) {
-        console.error('[orchestrate] PLAN JSON PARSE FAILED. Raw output was:', planRaw);
-        throw new Error('Groq responded, but not in the expected JSON format. Raw: ' + planRaw.slice(0, 200));
-      }
-
-      agents = (plan.agents || []).filter((a) => SELECTABLE_AGENTS.includes(a)).slice(0, 4);
-      if (agents.length === 0) agents = hasDocument ? ['document', 'content'] : ['research', 'content'];
-      const tasks = plan.tasks || {};
-
-      agentTraces = await Promise.all(
-        agents.map(async (agentKey) => {
-          const info = AGENT_INFO[agentKey];
-          const subtask = tasks[agentKey] || effectiveQuery;
-          const needsSearch = agentKey === 'research' || agentKey === 'websearch';
-
-          let searchContext = '';
-          if (needsSearch) {
-            try {
-              const results = await webSearch(subtask, 6);
-              if (results.length) {
-                searchContext =
-                  '\n\nLIVE WEB SEARCH RESULTS (use these for current facts, news, and dates):\n' +
-                  results.map((r, i) => (i + 1) + '. ' + r.title + ' — ' + r.snippet + ' (' + r.link + ')').join('\n');
-              }
-            } catch (e) {
-              console.error('[orchestrate] web search failed for "' + subtask + '":', e.message);
-            }
-          }
-
-          const todayLine = needsSearch
-            ? ' Today\u2019s date is ' +
-              new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }) +
-              '. Use the live web search results provided below for current, up-to-date information — do not say your knowledge has a cutoff.'
-            : '';
-          const agentSystemPrompt =
-            'You are the ' + info.label + ' agent for NEXORA AI. ' + info.desc +
-            ' Complete this subtask as part of a larger collaborative answer. Be concise and concrete (under 120 words).' +
-            todayLine +
-            ' Respond in plain text only — no JSON, no markdown fences.';
-          try {
-            const output = await runProvider(PROVIDER, LEVEL, subtask + searchContext, agentSystemPrompt);
-            return { agent: agentKey, provider: PROVIDER, output: output.trim(), ok: true };
-          } catch (err) {
-            console.error('[orchestrate] AGENT "' + agentKey + '" FAILED:', err.message);
-            return { agent: agentKey, provider: PROVIDER, output: null, ok: false, error: err.message };
-          }
-        })
-      );
+      const { agents: planned, agentTraces: traces } = await planAndDelegate(effectiveQuery, hasDocument);
+      agents = planned;
+      agentTraces = traces;
 
       const successful = agentTraces.filter((t) => t.ok && t.output);
       if (successful.length === 0) {
@@ -160,16 +178,7 @@ router.post('/', async (req, res) => {
         throw new Error('All specialist agents failed to respond. First error: ' + firstReason);
       }
 
-      const synthesisInput = successful
-        .map((t) => '[' + AGENT_INFO[t.agent].label.toUpperCase() + ']\n' + t.output)
-        .join('\n\n');
-
-      const synthesisPrompt =
-        'You are the Verifier agent for NEXORA AI. Specialist agents have each contributed a piece toward the ' +
-        'user\u2019s original goal: "' + effectiveQuery.slice(0, 300) + '". Combine their contributions below into one clear, ' +
-        'well-organized, non-redundant final answer. Keep it under 200 words. You may use **bold** sparingly. ' +
-        'Respond in plain text only — no JSON, no markdown fences.\n\n' + synthesisInput;
-
+      const synthesisPrompt = buildSynthesisPrompt(effectiveQuery, successful);
       responseText = (await runProvider(PROVIDER, LEVEL, 'Synthesize the final answer now.', synthesisPrompt)).trim();
     }
   } catch (err) {
@@ -204,6 +213,109 @@ router.post('/', async (req, res) => {
     errorCode,
     conversation: convo
   });
+});
+
+// ─── Streaming route — text only (no attachments). Sends newline-delimited
+// JSON events as they happen: {type:'stage'}, {type:'agents'}, {type:'token'},
+// {type:'done'} or {type:'error'}. The final synthesis answer streams token by token.
+router.post('/stream', async (req, res) => {
+  const { conversationId, query } = req.body || {};
+
+  if (!query || !query.trim()) {
+    res.status(400).json({ error: 'query is required' });
+    return;
+  }
+
+  const trimmedQuery = query.trim();
+  const db = readDB();
+
+  let convo = conversationId ? db.conversations.find((c) => c.id === conversationId) : null;
+  if (!convo) {
+    convo = {
+      id: makeId(),
+      title: trimmedQuery.slice(0, 48),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      messages: []
+    };
+    db.conversations.unshift(convo);
+  }
+  convo.messages.push({ role: 'user', content: trimmedQuery, time: new Date().toISOString() });
+
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache');
+  if (typeof res.flushHeaders === 'function') res.flushHeaders();
+
+  function send(obj) {
+    res.write(JSON.stringify(obj) + '\n');
+  }
+
+  let agents = [];
+  let agentTraces = [];
+  let fullText = '';
+
+  try {
+    if (!isConfigured(PROVIDER)) {
+      const err = new Error('GROQ_API_KEY is missing from backend/.env');
+      err.code = 'NO_KEY';
+      throw err;
+    }
+
+    send({ type: 'stage', stage: 'planning' });
+    const { agents: planned, agentTraces: traces } = await planAndDelegate(trimmedQuery, false);
+    agents = planned;
+    agentTraces = traces;
+
+    const savedTraces = agentTraces.map((t) => ({ agent: t.agent, provider: t.provider, ok: t.ok }));
+    send({ type: 'agents', agents, agentTraces: savedTraces });
+
+    const successful = agentTraces.filter((t) => t.ok && t.output);
+    if (successful.length === 0) {
+      const firstReason = (agentTraces.find((t) => !t.ok) || {}).error || 'unknown error';
+      throw new Error('All specialist agents failed to respond. First error: ' + firstReason);
+    }
+
+    const synthesisPrompt = buildSynthesisPrompt(trimmedQuery, successful);
+    send({ type: 'stage', stage: 'verifying' });
+
+    await streamProvider(PROVIDER, LEVEL, 'Synthesize the final answer now.', synthesisPrompt, (token) => {
+      fullText += token;
+      send({ type: 'token', text: token });
+    });
+
+    convo.messages.push({
+      role: 'assistant',
+      content: fullText.trim(),
+      agents,
+      agentTraces: savedTraces,
+      time: new Date().toISOString()
+    });
+    convo.updatedAt = new Date().toISOString();
+    writeDB(db);
+
+    send({ type: 'done', conversationId: convo.id });
+  } catch (err) {
+    console.error('[orchestrate/stream] REQUEST FAILED:', err.message);
+    const errorCode = err.code === 'NO_KEY' ? 'NO_KEY' : 'ERROR';
+    const message =
+      errorCode === 'NO_KEY'
+        ? 'Groq needs an API key in backend/.env. Add GROQ_API_KEY, restart the server, and try again.'
+        : "I couldn't complete this task right now (" + err.message + '). Please try again in a moment.';
+
+    convo.messages.push({
+      role: 'assistant',
+      content: message,
+      agents,
+      agentTraces: agentTraces.map((t) => ({ agent: t.agent, provider: t.provider, ok: t.ok })),
+      time: new Date().toISOString()
+    });
+    convo.updatedAt = new Date().toISOString();
+    writeDB(db);
+
+    send({ type: 'error', message, errorCode, conversationId: convo.id });
+  }
+
+  res.end();
 });
 
 module.exports = router;

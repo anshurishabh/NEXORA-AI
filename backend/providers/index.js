@@ -1,6 +1,5 @@
-const callOpenAICompatible = require('./openaiCompatible');
+const { callOpenAICompatible, streamOpenAICompatible } = require('./openaiCompatible');
 
-// Only Groq is used in NEXORA now. Free tier, generous limits.
 const PROVIDERS = {
   groq: {
     name: 'Groq',
@@ -13,8 +12,6 @@ const PROVIDERS = {
   }
 };
 
-// Used automatically whenever an image is attached — the text-only models
-// above can't see images, only this one can.
 const VISION_MODEL = 'qwen/qwen3.6-27b';
 
 const ORCH_SYSTEM_PROMPT =
@@ -60,4 +57,25 @@ async function runProvider(providerId, levelKey, query, systemPrompt, options) {
   return callOpenAICompatible('https://api.groq.com/openai/v1/chat/completions', modelToUse, apiKey, query, prompt, opts);
 }
 
-module.exports = { PROVIDERS, ORCH_SYSTEM_PROMPT, isConfigured, runProvider };
+async function streamProvider(providerId, levelKey, query, systemPrompt, onToken) {
+  const provider = PROVIDERS[providerId];
+  if (!provider) {
+    const err = new Error('Unknown provider: ' + providerId);
+    err.code = 'UNKNOWN_PROVIDER';
+    throw err;
+  }
+
+  const apiKey = process.env[provider.envKey];
+  if (!apiKey) {
+    const err = new Error(provider.name + ' API key is not set in backend/.env');
+    err.code = 'NO_KEY';
+    throw err;
+  }
+
+  const levelCfg = pickLevel(provider, levelKey);
+  const prompt = systemPrompt || ORCH_SYSTEM_PROMPT;
+
+  return streamOpenAICompatible('https://api.groq.com/openai/v1/chat/completions', levelCfg.model, apiKey, query, prompt, onToken);
+}
+
+module.exports = { PROVIDERS, ORCH_SYSTEM_PROMPT, isConfigured, runProvider, streamProvider };
