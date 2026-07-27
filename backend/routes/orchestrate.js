@@ -18,8 +18,6 @@ function parseJSON(text) {
   return JSON.parse(clean);
 }
 
-// Shared by both the normal and streaming routes: plans which agents are
-// needed, then runs them all in parallel (with live web search where relevant).
 async function planAndDelegate(effectiveQuery, hasDocument) {
   const planPrompt =
     'You are the planning agent for NEXORA AI. Decide which specialist agents from this fixed set are genuinely ' +
@@ -54,6 +52,7 @@ async function planAndDelegate(effectiveQuery, hasDocument) {
       const info = AGENT_INFO[agentKey];
       const subtask = tasks[agentKey] || effectiveQuery;
       const needsSearch = agentKey === 'research' || agentKey === 'websearch';
+      const isCoding = agentKey === 'coding';
 
       let searchContext = '';
       if (needsSearch) {
@@ -74,11 +73,17 @@ async function planAndDelegate(effectiveQuery, hasDocument) {
           new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }) +
           '. Use the live web search results provided below for current, up-to-date information — do not say your knowledge has a cutoff.'
         : '';
+
+      const formatLine = isCoding
+        ? ' If your answer includes code, wrap ONLY the code in a fenced block with the language name, ' +
+          'like ```python\ncode here\n```. Keep any explanation outside the fence in plain text.'
+        : ' Respond in plain text only — no markdown fences.';
+
       const agentSystemPrompt =
         'You are the ' + info.label + ' agent for NEXORA AI. ' + info.desc +
-        ' Complete this subtask as part of a larger collaborative answer. Be concise and concrete (under 120 words).' +
-        todayLine +
-        ' Respond in plain text only — no JSON, no markdown fences.';
+        ' Complete this subtask as part of a larger collaborative answer. Be concise and concrete (under 150 words).' +
+        todayLine + formatLine + ' Do not output JSON.';
+
       try {
         const output = await runProvider(PROVIDER, LEVEL, subtask + searchContext, agentSystemPrompt);
         return { agent: agentKey, provider: PROVIDER, output: output.trim(), ok: true };
@@ -99,12 +104,13 @@ function buildSynthesisPrompt(originalGoal, successful) {
   return (
     'You are the Verifier agent for NEXORA AI. Specialist agents have each contributed a piece toward the ' +
     'user\u2019s original goal: "' + originalGoal.slice(0, 300) + '". Combine their contributions below into one clear, ' +
-    'well-organized, non-redundant final answer. Keep it under 200 words. You may use **bold** sparingly. ' +
-    'Respond in plain text only — no JSON, no markdown fences.\n\n' + synthesisInput
+    'well-organized, non-redundant final answer. Keep it under 220 words. You may use **bold** sparingly. ' +
+    'If any contribution contains a fenced code block (```), copy that code block into your answer EXACTLY as-is, ' +
+    'including the ``` fences and language tag — do not retype, reformat, or paraphrase code. Keep everything else ' +
+    'in plain text with no markdown fences.\n\n' + synthesisInput
   );
 }
 
-// ─── Normal (non-streaming) route — supports text, image, and document attachments ───
 router.post('/', async (req, res) => {
   const { conversationId, query, attachment } = req.body || {};
 
@@ -215,9 +221,6 @@ router.post('/', async (req, res) => {
   });
 });
 
-// ─── Streaming route — text only (no attachments). Sends newline-delimited
-// JSON events as they happen: {type:'stage'}, {type:'agents'}, {type:'token'},
-// {type:'done'} or {type:'error'}. The final synthesis answer streams token by token.
 router.post('/stream', async (req, res) => {
   const { conversationId, query } = req.body || {};
 
