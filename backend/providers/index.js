@@ -13,6 +13,10 @@ const PROVIDERS = {
   }
 };
 
+// Used automatically whenever an image is attached — the text-only models
+// above can't see images, only this one can.
+const VISION_MODEL = 'qwen/qwen3.6-27b';
+
 const ORCH_SYSTEM_PROMPT =
   'You are the orchestrator for NEXORA AI, a multi-agent assistant platform. ' +
   'Given the user\u2019s goal, decide which specialist agents from this fixed set are genuinely needed: ' +
@@ -33,7 +37,8 @@ function pickLevel(provider, levelKey) {
   return provider.levels[levelKey] || provider.levels.normal || Object.values(provider.levels)[0];
 }
 
-async function runProvider(providerId, levelKey, query, systemPrompt) {
+async function runProvider(providerId, levelKey, query, systemPrompt, options) {
+  const opts = options || {};
   const provider = PROVIDERS[providerId];
   if (!provider) {
     const err = new Error('Unknown provider: ' + providerId);
@@ -49,9 +54,10 @@ async function runProvider(providerId, levelKey, query, systemPrompt) {
   }
 
   const levelCfg = pickLevel(provider, levelKey);
+  const modelToUse = opts.imageBase64 ? VISION_MODEL : levelCfg.model;
   const prompt = systemPrompt || ORCH_SYSTEM_PROMPT;
 
-  return callOpenAICompatible('https://api.groq.com/openai/v1/chat/completions', levelCfg.model, apiKey, query, prompt);
+  return callOpenAICompatible('https://api.groq.com/openai/v1/chat/completions', modelToUse, apiKey, query, prompt, opts);
 }
 
 module.exports = { PROVIDERS, ORCH_SYSTEM_PROMPT, isConfigured, runProvider };

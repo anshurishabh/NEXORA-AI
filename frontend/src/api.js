@@ -32,6 +32,8 @@ export const api = {
   summarizeDocument: (body) => request('/api/document/summarize', { method: 'POST', body: JSON.stringify(body) }),
   askDocument: (body) => request('/api/document/ask', { method: 'POST', body: JSON.stringify(body) }),
 
+  generateImage: (body) => request('/api/image/generate', { method: 'POST', body: JSON.stringify(body) }),
+
   getProviders: () => request('/api/providers'),
   getAnalytics: () => request('/api/analytics'),
 

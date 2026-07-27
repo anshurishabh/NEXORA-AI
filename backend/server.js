@@ -8,12 +8,13 @@ const conversationsRoute = require('./routes/conversations');
 const documentsRoute = require('./routes/documents');
 const providersRoute = require('./routes/providers');
 const analyticsRoute = require('./routes/analytics');
+const imageRoute = require('./routes/image');
 const { readDB } = require('./db');
 
 const app = express();
 
 app.use(cors());
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '20mb' }));
 
 app.get('/', (req, res) => {
   res.json({ ok: true, name: 'NEXORA AI backend', status: 'running' });
@@ -26,6 +27,7 @@ app.use('/api/conversations', conversationsRoute);
 app.use('/api/document', documentsRoute);
 app.use('/api/providers', providersRoute);
 app.use('/api/analytics', analyticsRoute);
+app.use('/api/image', imageRoute);
 
 app.get('/api/export', (req, res) => {
   const db = readDB();
