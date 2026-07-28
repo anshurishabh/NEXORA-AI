@@ -19,8 +19,6 @@ async function request(path, options) {
   return data;
 }
 
-// Streams /api/orchestrate/stream — calls onEvent(obj) for every JSON line
-// the backend sends as it plans, delegates, and generates the final answer.
 async function streamOrchestrate(body, onEvent) {
   const res = await fetch(BASE + '/api/orchestrate/stream', {
     method: 'POST',
@@ -62,6 +60,7 @@ export const api = {
   createConversation: (title) => request('/api/conversations', { method: 'POST', body: JSON.stringify({ title }) }),
   deleteConversation: (id) => request('/api/conversations/' + id, { method: 'DELETE' }),
   clearAllConversations: () => request('/api/conversations', { method: 'DELETE' }),
+  conversationExportUrl: (id, format) => BASE + '/api/conversations/' + id + '/export?format=' + (format || 'txt'),
 
   extractDocument: (body) => request('/api/document/extract', { method: 'POST', body: JSON.stringify(body) }),
   summarizeDocument: (body) => request('/api/document/summarize', { method: 'POST', body: JSON.stringify(body) }),
@@ -69,6 +68,10 @@ export const api = {
 
   generateImage: (body) => request('/api/image/generate', { method: 'POST', body: JSON.stringify(body) }),
   executeCode: (body) => request('/api/code/execute', { method: 'POST', body: JSON.stringify(body) }),
+
+  getMemory: () => request('/api/memory'),
+  addMemory: (note) => request('/api/memory', { method: 'POST', body: JSON.stringify({ note }) }),
+  deleteMemory: (id) => request('/api/memory/' + id, { method: 'DELETE' }),
 
   getProviders: () => request('/api/providers'),
   getAnalytics: () => request('/api/analytics'),

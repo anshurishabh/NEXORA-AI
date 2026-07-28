@@ -1,4 +1,5 @@
 const { callOpenAICompatible, streamOpenAICompatible } = require('./openaiCompatible');
+const { queuedCall, queuedStream } = require('../queue');
 
 const PROVIDERS = {
   groq: {
@@ -54,7 +55,9 @@ async function runProvider(providerId, levelKey, query, systemPrompt, options) {
   const modelToUse = opts.imageBase64 ? VISION_MODEL : levelCfg.model;
   const prompt = systemPrompt || ORCH_SYSTEM_PROMPT;
 
-  return callOpenAICompatible('https://api.groq.com/openai/v1/chat/completions', modelToUse, apiKey, query, prompt, opts);
+  return queuedCall(() =>
+    callOpenAICompatible('https://api.groq.com/openai/v1/chat/completions', modelToUse, apiKey, query, prompt, opts)
+  );
 }
 
 async function streamProvider(providerId, levelKey, query, systemPrompt, onToken) {
@@ -75,7 +78,9 @@ async function streamProvider(providerId, levelKey, query, systemPrompt, onToken
   const levelCfg = pickLevel(provider, levelKey);
   const prompt = systemPrompt || ORCH_SYSTEM_PROMPT;
 
-  return streamOpenAICompatible('https://api.groq.com/openai/v1/chat/completions', levelCfg.model, apiKey, query, prompt, onToken);
+  return queuedStream(() =>
+    streamOpenAICompatible('https://api.groq.com/openai/v1/chat/completions', levelCfg.model, apiKey, query, prompt, onToken)
+  );
 }
 
 module.exports = { PROVIDERS, ORCH_SYSTEM_PROMPT, isConfigured, runProvider, streamProvider };

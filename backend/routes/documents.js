@@ -13,12 +13,10 @@ const SUMMARY_PROMPT =
 
 const QA_PROMPT =
   'You are the Document Intelligence agent for NEXORA AI. Answer the question using only the provided ' +
-  'document content. If the content is missing or insufficient, say so honestly rather than guessing. ' +
+  'document content and, if given, the earlier Q&A on this same document (for follow-up context). ' +
+  'If the content is missing or insufficient, say so honestly rather than guessing. ' +
   'Keep the answer under 130 words. Respond in plain text only, no JSON, no markdown fences.';
 
-// Extracts real text from an uploaded PDF or DOCX file (sent as base64 from
-// the frontend) so the Document Intelligence agent has actual content to
-// work with, instead of just a filename.
 router.post('/extract', async (req, res) => {
   const { filename, fileBase64 } = req.body || {};
   if (!filename || !fileBase64) {
@@ -68,15 +66,24 @@ router.post('/summarize', async (req, res) => {
   }
 });
 
+// Multi-turn: accepts `history` (previous Q&A pairs on this same document) so
+// follow-up questions like "what about the second point" work correctly.
 router.post('/ask', async (req, res) => {
-  const { text, filename, question } = req.body || {};
+  const { text, filename, question, history } = req.body || {};
   if (!question || !String(question).trim()) {
     return res.status(400).json({ error: 'question is required' });
   }
+
+  const historyBlock = (history || [])
+    .slice(-6)
+    .map((h) => 'Q: ' + h.question + '\nA: ' + h.answer)
+    .join('\n\n');
+
   const content =
     'DOCUMENT NAME: ' + (filename || 'unknown') + '\n\nCONTENT:\n' +
     (text ? String(text).slice(0, 6000) : '[No extractable text was provided for this file type]') +
-    '\n\nQUESTION: ' + question;
+    (historyBlock ? '\n\nPREVIOUS Q&A ON THIS DOCUMENT:\n' + historyBlock : '') +
+    '\n\nNEW QUESTION: ' + question;
 
   try {
     const raw = await runProvider(PROVIDER, LEVEL, content, QA_PROMPT);

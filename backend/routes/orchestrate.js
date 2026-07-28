@@ -18,6 +18,16 @@ function parseJSON(text) {
   return JSON.parse(clean);
 }
 
+function memoryBlock(db) {
+  const notes = (db.memory || []).map((m) => m.text);
+  if (!notes.length) return '';
+  return (
+    '\n\n[PERSISTENT USER CONTEXT — facts/preferences the user asked to be remembered across all chats. ' +
+    'Use these naturally where relevant; do not list them back verbatim unless asked.]\n' +
+    notes.map((n) => '- ' + n).join('\n')
+  );
+}
+
 async function planAndDelegate(effectiveQuery, hasDocument) {
   const planPrompt =
     'You are the planning agent for NEXORA AI. Decide which specialist agents from this fixed set are genuinely ' +
@@ -123,6 +133,7 @@ router.post('/', async (req, res) => {
 
   const trimmedQuery = (query || '').trim() || (hasImage ? 'Describe this image and anything useful about it.' : '');
   const db = readDB();
+  const memCtx = memoryBlock(db);
 
   let convo = conversationId ? db.conversations.find((c) => c.id === conversationId) : null;
   if (!convo) {
@@ -159,7 +170,7 @@ router.post('/', async (req, res) => {
       const visionPrompt =
         'You are the Vision agent for NEXORA AI. Look at the attached image carefully and respond helpfully ' +
         'to the user\u2019s request about it. Be specific about what you actually see. Respond in plain text only, ' +
-        'under 180 words, no markdown fences.';
+        'under 180 words, no markdown fences.' + memCtx;
       const output = await runProvider(PROVIDER, LEVEL, trimmedQuery, visionPrompt, {
         imageBase64: attachment.base64,
         imageMimeType: attachment.mimeType
@@ -168,11 +179,12 @@ router.post('/', async (req, res) => {
       agents = ['content'];
       agentTraces = [{ agent: 'content', provider: PROVIDER, ok: true, output: responseText }];
     } else {
-      const effectiveQuery = hasDocument
-        ? 'The user attached a document named "' + attachment.name + '". Document content:\n' +
-          (attachment.text ? attachment.text.slice(0, 6000) : '[No extractable text was found in this file]') +
-          '\n\nUser request: ' + (trimmedQuery || 'Summarize this document and highlight anything important.')
-        : trimmedQuery;
+      const effectiveQuery =
+        (hasDocument
+          ? 'The user attached a document named "' + attachment.name + '". Document content:\n' +
+            (attachment.text ? attachment.text.slice(0, 6000) : '[No extractable text was found in this file]') +
+            '\n\nUser request: ' + (trimmedQuery || 'Summarize this document and highlight anything important.')
+          : trimmedQuery) + memCtx;
 
       const { agents: planned, agentTraces: traces } = await planAndDelegate(effectiveQuery, hasDocument);
       agents = planned;
@@ -205,6 +217,8 @@ router.post('/', async (req, res) => {
     content: responseText,
     agents,
     agentTraces: savedTraces,
+    ok: !usedFallback,
+    errorCode,
     time: new Date().toISOString()
   });
   convo.updatedAt = new Date().toISOString();
@@ -231,6 +245,7 @@ router.post('/stream', async (req, res) => {
 
   const trimmedQuery = query.trim();
   const db = readDB();
+  const memCtx = memoryBlock(db);
 
   let convo = conversationId ? db.conversations.find((c) => c.id === conversationId) : null;
   if (!convo) {
@@ -256,6 +271,7 @@ router.post('/stream', async (req, res) => {
   let agents = [];
   let agentTraces = [];
   let fullText = '';
+  let failed = false;
 
   try {
     if (!isConfigured(PROVIDER)) {
@@ -265,7 +281,7 @@ router.post('/stream', async (req, res) => {
     }
 
     send({ type: 'stage', stage: 'planning' });
-    const { agents: planned, agentTraces: traces } = await planAndDelegate(trimmedQuery, false);
+    const { agents: planned, agentTraces: traces } = await planAndDelegate(trimmedQuery + memCtx, false);
     agents = planned;
     agentTraces = traces;
 
@@ -291,6 +307,7 @@ router.post('/stream', async (req, res) => {
       content: fullText.trim(),
       agents,
       agentTraces: savedTraces,
+      ok: true,
       time: new Date().toISOString()
     });
     convo.updatedAt = new Date().toISOString();
@@ -298,6 +315,7 @@ router.post('/stream', async (req, res) => {
 
     send({ type: 'done', conversationId: convo.id });
   } catch (err) {
+    failed = true;
     console.error('[orchestrate/stream] REQUEST FAILED:', err.message);
     const errorCode = err.code === 'NO_KEY' ? 'NO_KEY' : 'ERROR';
     const message =
@@ -310,6 +328,8 @@ router.post('/stream', async (req, res) => {
       content: message,
       agents,
       agentTraces: agentTraces.map((t) => ({ agent: t.agent, provider: t.provider, ok: t.ok })),
+      ok: false,
+      errorCode,
       time: new Date().toISOString()
     });
     convo.updatedAt = new Date().toISOString();

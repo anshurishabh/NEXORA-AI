@@ -6,7 +6,6 @@ function makeId() {
   return 'conv_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
 }
 
-// GET /api/conversations — lightweight list for the sidebar
 router.get('/', (req, res) => {
   const db = readDB();
   const list = db.conversations
@@ -22,7 +21,6 @@ router.get('/', (req, res) => {
   res.json({ conversations: list });
 });
 
-// DELETE /api/conversations — clear everything (must be defined before the /:id route)
 router.delete('/', (req, res) => {
   const db = readDB();
   db.conversations = [];
@@ -30,7 +28,35 @@ router.delete('/', (req, res) => {
   res.json({ ok: true });
 });
 
-// GET /api/conversations/:id — full message history for one chat
+// GET /api/conversations/:id/export?format=txt|md — download one chat
+router.get('/:id/export', (req, res) => {
+  const db = readDB();
+  const convo = db.conversations.find((c) => c.id === req.params.id);
+  if (!convo) return res.status(404).json({ error: 'Conversation not found' });
+
+  const safeName = (convo.title || 'chat').replace(/[^a-z0-9]/gi, '_').slice(0, 40) || 'chat';
+  const format = req.query.format === 'md' ? 'md' : 'txt';
+
+  let out = '';
+  if (format === 'md') {
+    out += '# ' + convo.title + '\n\n_Exported from NEXORA AI on ' + new Date().toLocaleString() + '_\n\n---\n\n';
+    convo.messages.forEach((m) => {
+      out += '**' + (m.role === 'user' ? 'You' : 'NEXORA') + ':**\n\n' + (m.content || '') + '\n\n';
+    });
+    res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="' + safeName + '.md"');
+  } else {
+    out += convo.title + '\n' + '='.repeat(convo.title.length) + '\n';
+    out += 'Exported from NEXORA AI on ' + new Date().toLocaleString() + '\n\n';
+    convo.messages.forEach((m) => {
+      out += (m.role === 'user' ? 'You' : 'NEXORA') + ':\n' + (m.content || '') + '\n\n';
+    });
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="' + safeName + '.txt"');
+  }
+  res.send(out);
+});
+
 router.get('/:id', (req, res) => {
   const db = readDB();
   const convo = db.conversations.find((c) => c.id === req.params.id);
@@ -38,7 +64,6 @@ router.get('/:id', (req, res) => {
   res.json({ conversation: convo });
 });
 
-// POST /api/conversations — create an empty chat (used by "+ New Chat")
 router.post('/', (req, res) => {
   const db = readDB();
   const convo = {
@@ -53,7 +78,6 @@ router.post('/', (req, res) => {
   res.json({ conversation: convo });
 });
 
-// DELETE /api/conversations/:id — remove one chat
 router.delete('/:id', (req, res) => {
   const db = readDB();
   const idx = db.conversations.findIndex((c) => c.id === req.params.id);

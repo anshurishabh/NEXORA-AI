@@ -14,11 +14,7 @@ function TypingDots() {
 function readFileAsBase64(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onload = () => {
-      // reader.result looks like "data:application/pdf;base64,JVBERi0x..."
-      const base64 = reader.result.split(',')[1];
-      resolve(base64);
-    };
+    reader.onload = () => resolve(reader.result.split(',')[1]);
     reader.onerror = reject;
     reader.readAsDataURL(file);
   });
@@ -30,7 +26,7 @@ export default function Documents() {
   const [summary, setSummary] = useState('');
   const [loadingSummary, setLoadingSummary] = useState(false);
   const [question, setQuestion] = useState('');
-  const [answer, setAnswer] = useState('');
+  const [qaHistory, setQaHistory] = useState([]); // [{question, answer}]
   const [loadingAnswer, setLoadingAnswer] = useState(false);
 
   async function runSummary(text, name) {
@@ -49,7 +45,7 @@ export default function Documents() {
     if (!file) return;
     setFileName(file.name);
     setSummary('');
-    setAnswer('');
+    setQaHistory([]);
     setQuestion('');
     setDocText(null);
 
@@ -91,14 +87,13 @@ export default function Documents() {
   async function handleAsk() {
     if (!question.trim()) return;
     setLoadingAnswer(true);
-    setAnswer('');
     const q = question;
     setQuestion('');
     try {
-      const data = await api.askDocument({ text: docText, filename: fileName, question: q });
-      setAnswer(data.answer);
+      const data = await api.askDocument({ text: docText, filename: fileName, question: q, history: qaHistory });
+      setQaHistory((prev) => [...prev, { question: q, answer: data.answer }]);
     } catch (err) {
-      setAnswer("Couldn't reach the backend — " + err.message);
+      setQaHistory((prev) => [...prev, { question: q, answer: "Couldn't reach the backend — " + err.message }]);
     }
     setLoadingAnswer(false);
   }
@@ -108,7 +103,8 @@ export default function Documents() {
       <div className="page-pad">
         <h1 className="page-title">Document Intelligence</h1>
         <p className="page-desc">
-          Upload a .txt, .md, .pdf, or .docx file — the agent extracts the real text and summarizes it live.
+          Upload a .txt, .md, .pdf, or .docx file — ask follow-up questions and the agent remembers earlier answers
+          about this same document.
         </p>
 
         <label className={'dropzone' + (fileName ? ' has-file' : '')}>
@@ -126,6 +122,18 @@ export default function Documents() {
         {fileName && (
           <div className="panel">
             <h4>Ask about this document</h4>
+
+            {qaHistory.length > 0 && (
+              <div style={{ marginBottom: 14 }}>
+                {qaHistory.map((qa, i) => (
+                  <div key={i} style={{ marginBottom: 12 }}>
+                    <div style={{ fontSize: 13, opacity: 0.7, marginBottom: 4 }}>Q: {qa.question}</div>
+                    <div className="qa-answer" style={{ margin: 0 }}>{qa.answer}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+
             <div className="qa-row">
               <input
                 value={question}
@@ -133,13 +141,13 @@ export default function Documents() {
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') handleAsk();
                 }}
-                placeholder="e.g. What are the key points?"
+                placeholder={qaHistory.length ? 'Ask a follow-up...' : 'e.g. What are the key points?'}
               />
               <button className="btn-primary" onClick={handleAsk} disabled={loadingAnswer}>
                 ASK
               </button>
             </div>
-            {(loadingAnswer || answer) && <div className="qa-answer">{loadingAnswer ? <TypingDots /> : answer}</div>}
+            {loadingAnswer && <div className="qa-answer"><TypingDots /></div>}
           </div>
         )}
       </div>

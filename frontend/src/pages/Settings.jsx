@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useApp } from '../context/AppContext.jsx';
 import { api } from '../api.js';
 import { LEVEL_LABEL, LEVEL_ORDER } from '../constants.js';
@@ -21,6 +21,14 @@ export default function Settings() {
   const [workspaceName, setWorkspaceName] = useState('My NEXORA Workspace');
   const [clearing, setClearing] = useState(false);
 
+  const [memory, setMemory] = useState([]);
+  const [newNote, setNewNote] = useState('');
+  const [savingNote, setSavingNote] = useState(false);
+
+  useEffect(() => {
+    api.getMemory().then((d) => setMemory(d.memory || [])).catch(() => {});
+  }, []);
+
   function toggle(key) {
     setToggles((t) => ({ ...t, [key]: !t[key] }));
   }
@@ -38,13 +46,78 @@ export default function Settings() {
     setClearing(false);
   }
 
+  async function addNote() {
+    if (!newNote.trim()) return;
+    setSavingNote(true);
+    try {
+      const data = await api.addMemory(newNote.trim());
+      setMemory(data.memory);
+      setNewNote('');
+    } catch (err) {
+      alert('Could not save: ' + err.message);
+    }
+    setSavingNote(false);
+  }
+
+  async function removeNote(id) {
+    try {
+      const data = await api.deleteMemory(id);
+      setMemory(data.memory);
+    } catch (err) {
+      alert('Could not delete: ' + err.message);
+    }
+  }
+
   return (
     <div className="page active">
       <div className="page-pad">
         <h1 className="page-title">Settings</h1>
-        <p className="page-desc">Model connection, security controls, and workspace preferences.</p>
+        <p className="page-desc">Model connection, memory, security controls, and workspace preferences.</p>
 
         <div className="settings-panel">
+          <div className="panel">
+            <h4>🧠 Memory</h4>
+            <p className="provider-note">
+              Facts or preferences NEXORA should remember across every future chat — e.g. "I prefer answers in
+              Hinglish" or "I'm a B.Tech CSE student at BBDU".
+            </p>
+            <div className="qa-row" style={{ marginBottom: 10 }}>
+              <input
+                value={newNote}
+                onChange={(e) => setNewNote(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') addNote();
+                }}
+                placeholder="e.g. Always reply in Hinglish"
+              />
+              <button className="btn-primary" onClick={addNote} disabled={savingNote || !newNote.trim()}>
+                Add
+              </button>
+            </div>
+            {memory.length === 0 ? (
+              <div className="empty-note">No memory saved yet.</div>
+            ) : (
+              memory.map((m) => (
+                <div
+                  key={m.id}
+                  style={{
+                    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                    padding: '8px 10px', borderRadius: 8, background: '#16161f', marginBottom: 6, fontSize: 13
+                  }}
+                >
+                  <span>{m.text}</span>
+                  <button
+                    onClick={() => removeNote(m.id)}
+                    style={{ background: 'none', border: 'none', color: '#e0a458', cursor: 'pointer', fontSize: 16 }}
+                    title="Remove"
+                  >
+                    ×
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
+
           <div className="panel">
             <div className="panel-head-row">
               <h4>Model Providers</h4>
@@ -54,8 +127,7 @@ export default function Settings() {
             </div>
             <p className="provider-note">
               API keys live in <code>backend/.env</code> — not here. Add a key, restart the backend server, and it
-              shows as CONFIGURED below. This keeps your keys off the browser entirely. The provider you pick in the
-              Console's model bar is the one every agent runs on.
+              shows as CONFIGURED below.
             </p>
             {loadingProviders ? (
               <div className="empty-note">Loading...</div>

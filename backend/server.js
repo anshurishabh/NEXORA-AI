@@ -10,6 +10,7 @@ const providersRoute = require('./routes/providers');
 const analyticsRoute = require('./routes/analytics');
 const imageRoute = require('./routes/image');
 const codeRoute = require('./routes/code');
+const memoryRoute = require('./routes/memory');
 const { readDB } = require('./db');
 
 const app = express();
@@ -30,6 +31,7 @@ app.use('/api/providers', providersRoute);
 app.use('/api/analytics', analyticsRoute);
 app.use('/api/image', imageRoute);
 app.use('/api/code', codeRoute);
+app.use('/api/memory', memoryRoute);
 
 app.get('/api/export', (req, res) => {
   const db = readDB();
