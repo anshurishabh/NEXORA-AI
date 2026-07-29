@@ -1,8 +1,8 @@
 /**
  * Calls Groq's OpenAI-compatible /chat/completions endpoint.
- * Handles reasoning models (like gpt-oss) that can silently return empty
- * content if they spend their whole token budget "thinking" — fixed by
- * raising max_tokens and telling the model to keep reasoning brief.
+ * max_tokens raised so detailed answers aren't cut short; reasoning models
+ * get reasoning_effort=low so their token budget mostly goes to the actual
+ * answer instead of internal thinking.
  */
 async function callOpenAICompatible(endpoint, model, apiKey, query, systemPrompt, options) {
   const opts = options || {};
@@ -25,7 +25,7 @@ async function callOpenAICompatible(endpoint, model, apiKey, query, systemPrompt
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userContent }
     ],
-    max_tokens: 1400
+    max_tokens: 2200
   };
   if (isReasoningModel) {
     body.reasoning_effort = 'low';
@@ -46,8 +46,6 @@ async function callOpenAICompatible(endpoint, model, apiKey, query, systemPrompt
 
   let content = data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
 
-  // Reasoning models sometimes put the real answer in a separate
-  // "reasoning" field if they run out of room before writing final content.
   if (!content) {
     const reasoning = data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.reasoning;
     if (reasoning) content = reasoning;
@@ -74,7 +72,7 @@ async function streamOpenAICompatible(endpoint, model, apiKey, query, systemProm
       { role: 'system', content: systemPrompt },
       { role: 'user', content: query }
     ],
-    max_tokens: 1400,
+    max_tokens: 2200,
     stream: true
   };
   if (isReasoningModel) {
