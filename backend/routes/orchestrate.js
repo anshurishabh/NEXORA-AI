@@ -4,10 +4,10 @@ const { runProvider, isConfigured, streamProvider } = require('../providers');
 const { readDB, writeDB } = require('../db');
 const AGENT_INFO = require('../agentConfig');
 const webSearch = require('../webSearch');
+const { getCached, setCached } = require('../cache');
 
 const SELECTABLE_AGENTS = ['research', 'coding', 'data', 'document', 'websearch', 'content'];
 const PROVIDER = 'groq';
-const LEVEL = 'normal';
 
 function makeId() {
   return 'conv_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
@@ -16,6 +16,22 @@ function makeId() {
 function parseJSON(text) {
   const clean = (text || '').replace(/```json/g, '').replace(/```/g, '').trim();
   return JSON.parse(clean);
+}
+
+// Smart routing — picks a model tier based on how complex the query looks,
+// WITHOUT spending an extra API call to decide. Saves tokens/rate-limit
+// budget on simple questions, and gives real depth to complex ones.
+function pickQueryLevel(query) {
+  const q = (query || '').toLowerCase();
+  const wordCount = q.trim().split(/\s+/).filter(Boolean).length;
+  const complexSignals =
+    /\b(explain|analyze|analyse|compare|comparison|detailed|detail|essay|write a|design|architecture|step by step|pros and cons|research|comprehensive|code|debug|algorithm|strategy|plan|summary|summarize)\b/;
+  const isComplex = complexSignals.test(q) || wordCount > 25;
+  const isTrivial = wordCount <= 6 && !complexSignals.test(q);
+
+  if (isTrivial) return 'fast';
+  if (isComplex) return 'normal';
+  return 'medium';
 }
 
 function memoryBlock(db) {
@@ -28,10 +44,6 @@ function memoryBlock(db) {
   );
 }
 
-// Builds a recap of THIS chat's ENTIRE earlier history so the model always
-// remembers everything said in this conversation, not just the last few turns.
-// `convo.messages` at call time already includes the just-pushed new user
-// message, so we drop that last item and use everything before it.
 function historyBlock(convo) {
   if (!convo || !convo.messages || convo.messages.length <= 1) return '';
   const prior = convo.messages.slice(0, -1);
@@ -61,9 +73,11 @@ async function planAndDelegate(effectiveQuery, hasDocument, usageTotals) {
     'Pick between 1 and 4 truly relevant agents.' +
     (hasDocument ? ' A document was attached, so include the "document" agent.' : '');
 
+  // Planning is just a classification task — always use the fast/cheap tier
+  // regardless of query complexity, to save tokens for the actual answer.
   let planResult;
   try {
-    planResult = await runProvider(PROVIDER, LEVEL, effectiveQuery, planPrompt);
+    planResult = await runProvider(PROVIDER, 'fast', effectiveQuery, planPrompt);
   } catch (planErr) {
     console.error('[orchestrate] PLANNING STEP FAILED:', planErr.message);
     throw planErr;
@@ -88,6 +102,7 @@ async function planAndDelegate(effectiveQuery, hasDocument, usageTotals) {
       const subtask = tasks[agentKey] || effectiveQuery;
       const needsSearch = agentKey === 'research' || agentKey === 'websearch';
       const isCoding = agentKey === 'coding';
+      const agentLevel = pickQueryLevel(subtask);
 
       let searchContext = '';
       let searchResultsUsed = [];
@@ -125,7 +140,7 @@ async function planAndDelegate(effectiveQuery, hasDocument, usageTotals) {
         todayLine + formatLine + ' Do not output JSON.';
 
       try {
-        const result = await runProvider(PROVIDER, LEVEL, subtask + searchContext, agentSystemPrompt);
+        const result = await runProvider(PROVIDER, agentLevel, subtask + searchContext, agentSystemPrompt);
         addUsage(usageTotals, result.usage);
         return {
           agent: agentKey,
@@ -184,7 +199,8 @@ async function runOrchestration(query, options) {
   }
 
   const synthesisPrompt = buildSynthesisPrompt(effectiveQuery, successful);
-  const synthResult = await runProvider(PROVIDER, LEVEL, 'Synthesize the final answer now.', synthesisPrompt);
+  const synthLevel = pickQueryLevel(query);
+  const synthResult = await runProvider(PROVIDER, synthLevel, 'Synthesize the final answer now.', synthesisPrompt);
   addUsage(usageTotals, synthResult.usage);
 
   return { agents, agentTraces, responseText: synthResult.text.trim(), usage: usageTotals };
@@ -236,45 +252,67 @@ router.post('/', async (req, res) => {
 
   const histCtx = historyBlock(convo);
 
+  // Only cache truly context-free queries — no memory, no chat history, no
+  // attachment — since anything personalized must not be reused elsewhere.
+  const cacheEligible = !hasImage && !hasDocument && !memCtx && !histCtx;
+
   let agents = [];
   let agentTraces = [];
   let responseText = '';
   let usedFallback = false;
   let errorCode = null;
   let tokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+  let servedFromCache = false;
 
   try {
-    if (!isConfigured(PROVIDER)) {
-      const err = new Error('GROQ_API_KEY is missing from backend/.env');
-      err.code = 'NO_KEY';
-      throw err;
+    if (cacheEligible) {
+      const cached = getCached(trimmedQuery);
+      if (cached) {
+        agents = cached.agents;
+        agentTraces = cached.agentTraces;
+        responseText = cached.responseText;
+        tokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+        servedFromCache = true;
+      }
     }
 
-    if (hasImage) {
-      const visionPrompt =
-        'You are the Vision agent for NEXORA AI. Look at the attached image carefully and respond helpfully ' +
-        'to the user\u2019s request about it. Be specific about what you actually see. Respond in plain text only, ' +
-        'under 180 words, no markdown fences.' + memCtx;
-      const result = await runProvider(PROVIDER, LEVEL, trimmedQuery, visionPrompt, {
-        imageBase64: attachment.base64,
-        imageMimeType: attachment.mimeType
-      });
-      responseText = result.text.trim();
-      tokenUsage = result.usage;
-      agents = ['content'];
-      agentTraces = [{ agent: 'content', provider: PROVIDER, ok: true, output: responseText, tokens: result.usage.totalTokens, subtask: trimmedQuery, sources: [] }];
-    } else {
-      const docQuery = hasDocument
-        ? 'The user attached a document named "' + attachment.name + '". Document content:\n' +
-          (attachment.text ? attachment.text.slice(0, 6000) : '[No extractable text was found in this file]') +
-          '\n\nUser request: ' + (trimmedQuery || 'Summarize this document and highlight anything important.')
-        : trimmedQuery;
+    if (!servedFromCache) {
+      if (!isConfigured(PROVIDER)) {
+        const err = new Error('GROQ_API_KEY is missing from backend/.env');
+        err.code = 'NO_KEY';
+        throw err;
+      }
 
-      const result = await runOrchestration(docQuery, { memoryContext: memCtx, historyContext: histCtx, hasDocument });
-      agents = result.agents;
-      agentTraces = result.agentTraces;
-      responseText = result.responseText;
-      tokenUsage = result.usage;
+      if (hasImage) {
+        const visionPrompt =
+          'You are the Vision agent for NEXORA AI. Look at the attached image carefully and respond helpfully ' +
+          'to the user\u2019s request about it. Be specific about what you actually see. Respond in plain text only, ' +
+          'under 180 words, no markdown fences.' + memCtx;
+        const result = await runProvider(PROVIDER, 'medium', trimmedQuery, visionPrompt, {
+          imageBase64: attachment.base64,
+          imageMimeType: attachment.mimeType
+        });
+        responseText = result.text.trim();
+        tokenUsage = result.usage;
+        agents = ['content'];
+        agentTraces = [{ agent: 'content', provider: PROVIDER, ok: true, output: responseText, tokens: result.usage.totalTokens, subtask: trimmedQuery, sources: [] }];
+      } else {
+        const docQuery = hasDocument
+          ? 'The user attached a document named "' + attachment.name + '". Document content:\n' +
+            (attachment.text ? attachment.text.slice(0, 6000) : '[No extractable text was found in this file]') +
+            '\n\nUser request: ' + (trimmedQuery || 'Summarize this document and highlight anything important.')
+          : trimmedQuery;
+
+        const result = await runOrchestration(docQuery, { memoryContext: memCtx, historyContext: histCtx, hasDocument });
+        agents = result.agents;
+        agentTraces = result.agentTraces;
+        responseText = result.responseText;
+        tokenUsage = result.usage;
+
+        if (cacheEligible) {
+          setCached(trimmedQuery, { agents, agentTraces, responseText });
+        }
+      }
     }
   } catch (err) {
     console.error('[orchestrate] REQUEST FAILED:', err.message);
@@ -297,6 +335,7 @@ router.post('/', async (req, res) => {
     ok: !usedFallback,
     errorCode,
     tokenUsage,
+    cached: servedFromCache,
     time: new Date().toISOString()
   });
   convo.updatedAt = new Date().toISOString();
@@ -310,6 +349,7 @@ router.post('/', async (req, res) => {
     usedFallback,
     errorCode,
     tokenUsage,
+    cached: servedFromCache,
     conversation: convo
   });
 });
@@ -340,6 +380,7 @@ router.post('/stream', async (req, res) => {
   convo.messages.push({ role: 'user', content: trimmedQuery, time: new Date().toISOString() });
 
   const histCtx = historyBlock(convo);
+  const cacheEligible = !memCtx && !histCtx;
 
   res.setHeader('Content-Type', 'text/plain; charset=utf-8');
   res.setHeader('Cache-Control', 'no-cache');
@@ -355,6 +396,42 @@ router.post('/stream', async (req, res) => {
   const usageTotals = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
 
   try {
+    if (cacheEligible) {
+      const cached = getCached(trimmedQuery);
+      if (cached) {
+        agents = cached.agents;
+        agentTraces = cached.agentTraces;
+        const savedTraces = agentTraces.map(toSavedTrace);
+        send({ type: 'agents', agents, agentTraces: savedTraces });
+
+        // Simulate a light typing effect for the cached answer instead of
+        // dumping it all at once, so the UI still feels consistent.
+        const words = cached.responseText.split(' ');
+        for (let i = 0; i < words.length; i += 4) {
+          const chunk = words.slice(i, i + 4).join(' ') + ' ';
+          fullText += chunk;
+          send({ type: 'token', text: chunk });
+          await new Promise((r) => setTimeout(r, 12));
+        }
+
+        convo.messages.push({
+          role: 'assistant',
+          content: fullText.trim(),
+          agents,
+          agentTraces: savedTraces,
+          ok: true,
+          cached: true,
+          time: new Date().toISOString()
+        });
+        convo.updatedAt = new Date().toISOString();
+        writeDB(db);
+
+        send({ type: 'done', conversationId: convo.id });
+        res.end();
+        return;
+      }
+    }
+
     if (!isConfigured(PROVIDER)) {
       const err = new Error('GROQ_API_KEY is missing from backend/.env');
       err.code = 'NO_KEY';
@@ -376,12 +453,17 @@ router.post('/stream', async (req, res) => {
     }
 
     const synthesisPrompt = buildSynthesisPrompt(trimmedQuery + histCtx, successful);
+    const synthLevel = pickQueryLevel(trimmedQuery);
     send({ type: 'stage', stage: 'verifying' });
 
-    await streamProvider(PROVIDER, LEVEL, 'Synthesize the final answer now.', synthesisPrompt, (token) => {
+    await streamProvider(PROVIDER, synthLevel, 'Synthesize the final answer now.', synthesisPrompt, (token) => {
       fullText += token;
       send({ type: 'token', text: token });
     });
+
+    if (cacheEligible) {
+      setCached(trimmedQuery, { agents, agentTraces, responseText: fullText.trim() });
+    }
 
     convo.messages.push({
       role: 'assistant',
