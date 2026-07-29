@@ -73,9 +73,11 @@ async function planAndDelegate(effectiveQuery, hasDocument, usageTotals) {
       const isCoding = agentKey === 'coding';
 
       let searchContext = '';
+      let searchResultsUsed = [];
       if (needsSearch) {
         try {
           const results = await webSearch(subtask, 6);
+          searchResultsUsed = results.map((r) => ({ title: r.title, link: r.link }));
           if (results.length) {
             searchContext =
               '\n\nLIVE WEB SEARCH RESULTS (use these for current facts, news, and dates):\n' +
@@ -108,13 +110,15 @@ async function planAndDelegate(effectiveQuery, hasDocument, usageTotals) {
         return {
           agent: agentKey,
           provider: PROVIDER,
+          subtask,
           output: result.text.trim(),
           ok: true,
-          tokens: result.usage.totalTokens
+          tokens: result.usage.totalTokens,
+          sources: searchResultsUsed
         };
       } catch (err) {
         console.error('[orchestrate] AGENT "' + agentKey + '" FAILED:', err.message);
-        return { agent: agentKey, provider: PROVIDER, output: null, ok: false, error: err.message, tokens: 0 };
+        return { agent: agentKey, provider: PROVIDER, subtask, output: null, ok: false, error: err.message, tokens: 0, sources: [] };
       }
     })
   );
@@ -136,8 +140,6 @@ function buildSynthesisPrompt(originalGoal, successful) {
   );
 }
 
-// Core pipeline — reused by the HTTP route AND the background scheduler.
-// Returns { agents, agentTraces, responseText, usage }
 async function runOrchestration(query, options) {
   const opts = options || {};
   const usageTotals = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
@@ -163,6 +165,18 @@ async function runOrchestration(query, options) {
   addUsage(usageTotals, synthResult.usage);
 
   return { agents, agentTraces, responseText: synthResult.text.trim(), usage: usageTotals };
+}
+
+function toSavedTrace(t) {
+  return {
+    agent: t.agent,
+    provider: t.provider,
+    ok: t.ok,
+    tokens: t.tokens || 0,
+    subtask: t.subtask || null,
+    output: t.output || null,
+    sources: t.sources || []
+  };
 }
 
 router.post('/', async (req, res) => {
@@ -223,7 +237,7 @@ router.post('/', async (req, res) => {
       responseText = result.text.trim();
       tokenUsage = result.usage;
       agents = ['content'];
-      agentTraces = [{ agent: 'content', provider: PROVIDER, ok: true, output: responseText, tokens: result.usage.totalTokens }];
+      agentTraces = [{ agent: 'content', provider: PROVIDER, ok: true, output: responseText, tokens: result.usage.totalTokens, subtask: trimmedQuery, sources: [] }];
     } else {
       const docQuery = hasDocument
         ? 'The user attached a document named "' + attachment.name + '". Document content:\n' +
@@ -248,7 +262,7 @@ router.post('/', async (req, res) => {
         : "I couldn't complete this task right now (" + err.message + '). Please try again in a moment.';
   }
 
-  const savedTraces = agentTraces.map((t) => ({ agent: t.agent, provider: t.provider, ok: t.ok, tokens: t.tokens || 0 }));
+  const savedTraces = agentTraces.map(toSavedTrace);
 
   convo.messages.push({
     role: 'assistant',
@@ -325,7 +339,7 @@ router.post('/stream', async (req, res) => {
     agents = planned.agents;
     agentTraces = planned.agentTraces;
 
-    const savedTraces = agentTraces.map((t) => ({ agent: t.agent, provider: t.provider, ok: t.ok, tokens: t.tokens || 0 }));
+    const savedTraces = agentTraces.map(toSavedTrace);
     send({ type: 'agents', agents, agentTraces: savedTraces });
 
     const successful = agentTraces.filter((t) => t.ok && t.output);
@@ -367,7 +381,7 @@ router.post('/stream', async (req, res) => {
       role: 'assistant',
       content: message,
       agents,
-      agentTraces: agentTraces.map((t) => ({ agent: t.agent, provider: t.provider, ok: t.ok, tokens: t.tokens || 0 })),
+      agentTraces: agentTraces.map(toSavedTrace),
       ok: false,
       errorCode,
       time: new Date().toISOString()

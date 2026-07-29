@@ -448,8 +448,8 @@ export default function Console() {
       const traces = result.agentTraces && result.agentTraces.length
         ? result.agentTraces
         : agents.map(function (a) {
-            return { agent: a, provider: 'groq', ok: true };
-          });
+          return { agent: a, provider: 'groq', ok: true };
+        });
 
       setMessages(function (prev) {
         return prev.concat([{ role: 'assistant', content: result.response, agents: agents, agentTraces: traces }]);
@@ -528,11 +528,11 @@ export default function Console() {
   const busy = sending || imagining;
   const activeTitle = activeId
     ? (function () {
-        const found = conversations.find(function (c) {
-          return c.id === activeId;
-        });
-        return found ? found.title : 'Chat';
-      })()
+      const found = conversations.find(function (c) {
+        return c.id === activeId;
+      });
+      return found ? found.title : 'Chat';
+    })()
     : 'New chat';
 
   return (
@@ -712,14 +712,40 @@ export default function Console() {
                         {expanded[i] ? '▾' : '▸'} {m.agents.length} agent{m.agents.length > 1 ? 's' : ''} used
                       </button>
                       {expanded[i] && (
-                        <div className="agent-trace-chips">
-                          {m.agents.map(function (a) {
-                            const cfg = AGENT_CONFIG[a];
+                        <div className="agent-trace-detail">
+                          {(m.agentTraces || []).map(function (t, ti) {
+                            const cfg = AGENT_CONFIG[t.agent];
                             return (
-                              <span className="trace-chip" key={a}>
-                                <span className="trace-chip-icon">{cfg ? cfg.icon : ''}</span>
-                                {cfg ? cfg.label : a}
-                              </span>
+                              <div
+                                key={ti}
+                                style={{
+                                  background: '#14141c', border: '1px solid #26262f', borderRadius: 8,
+                                  padding: 10, marginBottom: 8
+                                }}
+                              >
+                                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, opacity: 0.7, marginBottom: 6 }}>
+                                  <span>
+                                    {cfg ? cfg.icon + ' ' + cfg.label : t.agent}
+                                    {t.ok ? '' : ' (failed)'}
+                                  </span>
+                                  <span>{t.provider}{t.tokens ? ' · ' + t.tokens + ' tokens' : ''}</span>
+                                </div>
+                                {t.subtask && (
+                                  <div style={{ fontSize: 12, opacity: 0.5, marginBottom: 6 }}>Task: {t.subtask}</div>
+                                )}
+                                {t.output ? (
+                                  <MessageContent content={t.output} />
+                                ) : (
+                                  <span style={{ fontSize: 12, opacity: 0.5 }}>
+                                    {t.ok ? 'No output recorded for this agent.' : 'This agent failed to respond.'}
+                                  </span>
+                                )}
+                                {t.sources && t.sources.length > 0 && (
+                                  <div style={{ fontSize: 11, opacity: 0.5, marginTop: 6 }}>
+                                    Sources: {t.sources.map(function (s) { return s.title; }).join(', ')}
+                                  </div>
+                                )}
+                              </div>
                             );
                           })}
                         </div>

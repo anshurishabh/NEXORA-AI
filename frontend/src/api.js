@@ -81,6 +81,7 @@ export const api = {
 
   getProviders: () => request('/api/providers'),
   getAnalytics: () => request('/api/analytics'),
+  analyzeData: (body) => request('/api/data/analyze', { method: 'POST', body: JSON.stringify(body) }),
 
   exportUrl: () => BASE + '/api/export'
 };
