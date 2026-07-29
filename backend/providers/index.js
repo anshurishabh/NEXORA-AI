@@ -35,6 +35,7 @@ function pickLevel(provider, levelKey) {
   return provider.levels[levelKey] || provider.levels.normal || Object.values(provider.levels)[0];
 }
 
+// Returns { text, usage: { promptTokens, completionTokens, totalTokens } }
 async function runProvider(providerId, levelKey, query, systemPrompt, options) {
   const opts = options || {};
   const provider = PROVIDERS[providerId];
@@ -55,9 +56,10 @@ async function runProvider(providerId, levelKey, query, systemPrompt, options) {
   const modelToUse = opts.imageBase64 ? VISION_MODEL : levelCfg.model;
   const prompt = systemPrompt || ORCH_SYSTEM_PROMPT;
 
-  return queuedCall(() =>
+  const result = await queuedCall(() =>
     callOpenAICompatible('https://api.groq.com/openai/v1/chat/completions', modelToUse, apiKey, query, prompt, opts)
   );
+  return { text: result.content, usage: result.usage };
 }
 
 async function streamProvider(providerId, levelKey, query, systemPrompt, onToken) {

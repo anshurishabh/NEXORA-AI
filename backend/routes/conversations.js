@@ -21,6 +21,33 @@ router.get('/', (req, res) => {
   res.json({ conversations: list });
 });
 
+// GET /api/conversations/search?q=xxx — searches titles AND message content
+router.get('/search', (req, res) => {
+  const q = (req.query.q || '').toLowerCase().trim();
+  if (!q) return res.json({ conversations: [] });
+
+  const db = readDB();
+  const results = db.conversations
+    .filter((c) => {
+      if ((c.title || '').toLowerCase().includes(q)) return true;
+      return c.messages.some((m) => (m.content || '').toLowerCase().includes(q));
+    })
+    .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt))
+    .map((c) => {
+      const matchedMsg = c.messages.find((m) => (m.content || '').toLowerCase().includes(q));
+      return {
+        id: c.id,
+        title: c.title,
+        createdAt: c.createdAt,
+        updatedAt: c.updatedAt,
+        messageCount: c.messages.length,
+        snippet: matchedMsg ? matchedMsg.content.slice(0, 90) : ''
+      };
+    });
+
+  res.json({ conversations: results });
+});
+
 router.delete('/', (req, res) => {
   const db = readDB();
   db.conversations = [];
@@ -28,7 +55,6 @@ router.delete('/', (req, res) => {
   res.json({ ok: true });
 });
 
-// GET /api/conversations/:id/export?format=txt|md — download one chat
 router.get('/:id/export', (req, res) => {
   const db = readDB();
   const convo = db.conversations.find((c) => c.id === req.params.id);

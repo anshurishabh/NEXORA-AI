@@ -5,9 +5,11 @@ const { readDB } = require('../db');
 router.get('/', (req, res) => {
   const db = readDB();
   const agentUsage = {};
+  const agentTokens = {};
   let tasksRun = 0;
   let successCount = 0;
   let failCount = 0;
+  let totalTokens = 0;
   const activity = [];
   const dayCounts = {};
 
@@ -17,6 +19,12 @@ router.get('/', (req, res) => {
       tasksRun += 1;
       if (m.ok === false) failCount += 1;
       else successCount += 1;
+
+      if (m.tokenUsage && m.tokenUsage.totalTokens) totalTokens += m.tokenUsage.totalTokens;
+
+      (m.agentTraces || []).forEach((t) => {
+        agentTokens[t.agent] = (agentTokens[t.agent] || 0) + (t.tokens || 0);
+      });
 
       (m.agents || []).forEach((a) => {
         agentUsage[a] = (agentUsage[a] || 0) + 1;
@@ -34,6 +42,7 @@ router.get('/', (req, res) => {
         query: (prevUserMsg && prevUserMsg.content) || c.title,
         agents: m.agents || [],
         ok: m.ok !== false,
+        tokens: m.tokenUsage ? m.tokenUsage.totalTokens : 0,
         time: m.time
       });
     });
@@ -56,6 +65,9 @@ router.get('/', (req, res) => {
     failCount,
     successRate: tasksRun ? Math.round((successCount / tasksRun) * 100) : 100,
     agentUsage,
+    agentTokens,
+    totalTokens,
+    avgTokensPerTask: tasksRun ? Math.round(totalTokens / tasksRun) : 0,
     activity: activity.slice(0, 20),
     dailyActivity,
     conversationCount: db.conversations.length,

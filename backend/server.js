@@ -11,7 +11,9 @@ const analyticsRoute = require('./routes/analytics');
 const imageRoute = require('./routes/image');
 const codeRoute = require('./routes/code');
 const memoryRoute = require('./routes/memory');
+const schedulesRoute = require('./routes/schedules');
 const { readDB } = require('./db');
+const { startScheduler } = require('./scheduler');
 
 const app = express();
 
@@ -32,6 +34,7 @@ app.use('/api/analytics', analyticsRoute);
 app.use('/api/image', imageRoute);
 app.use('/api/code', codeRoute);
 app.use('/api/memory', memoryRoute);
+app.use('/api/schedules', schedulesRoute);
 
 app.get('/api/export', (req, res) => {
   const db = readDB();
@@ -52,4 +55,5 @@ app.use((err, req, res, next) => {
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log('NEXORA AI backend running on http://localhost:' + PORT);
+  startScheduler();
 });

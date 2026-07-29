@@ -28,7 +28,14 @@ function memoryBlock(db) {
   );
 }
 
-async function planAndDelegate(effectiveQuery, hasDocument) {
+function addUsage(totals, usage) {
+  if (!usage) return;
+  totals.promptTokens += usage.promptTokens || 0;
+  totals.completionTokens += usage.completionTokens || 0;
+  totals.totalTokens += usage.totalTokens || 0;
+}
+
+async function planAndDelegate(effectiveQuery, hasDocument, usageTotals) {
   const planPrompt =
     'You are the planning agent for NEXORA AI. Decide which specialist agents from this fixed set are genuinely ' +
     'needed: research, coding, data, document, websearch, content. For each agent you pick, write ONE short, ' +
@@ -37,20 +44,21 @@ async function planAndDelegate(effectiveQuery, hasDocument) {
     'Pick between 1 and 4 truly relevant agents.' +
     (hasDocument ? ' A document was attached, so include the "document" agent.' : '');
 
-  let planRaw;
+  let planResult;
   try {
-    planRaw = await runProvider(PROVIDER, LEVEL, effectiveQuery, planPrompt);
+    planResult = await runProvider(PROVIDER, LEVEL, effectiveQuery, planPrompt);
   } catch (planErr) {
     console.error('[orchestrate] PLANNING STEP FAILED:', planErr.message);
     throw planErr;
   }
+  addUsage(usageTotals, planResult.usage);
 
   let plan;
   try {
-    plan = parseJSON(planRaw);
+    plan = parseJSON(planResult.text);
   } catch (parseErr) {
-    console.error('[orchestrate] PLAN JSON PARSE FAILED. Raw output was:', planRaw);
-    throw new Error('Groq responded, but not in the expected JSON format. Raw: ' + planRaw.slice(0, 200));
+    console.error('[orchestrate] PLAN JSON PARSE FAILED. Raw output was:', planResult.text);
+    throw new Error('Groq responded, but not in the expected JSON format. Raw: ' + planResult.text.slice(0, 200));
   }
 
   let agents = (plan.agents || []).filter((a) => SELECTABLE_AGENTS.includes(a)).slice(0, 4);
@@ -95,11 +103,18 @@ async function planAndDelegate(effectiveQuery, hasDocument) {
         todayLine + formatLine + ' Do not output JSON.';
 
       try {
-        const output = await runProvider(PROVIDER, LEVEL, subtask + searchContext, agentSystemPrompt);
-        return { agent: agentKey, provider: PROVIDER, output: output.trim(), ok: true };
+        const result = await runProvider(PROVIDER, LEVEL, subtask + searchContext, agentSystemPrompt);
+        addUsage(usageTotals, result.usage);
+        return {
+          agent: agentKey,
+          provider: PROVIDER,
+          output: result.text.trim(),
+          ok: true,
+          tokens: result.usage.totalTokens
+        };
       } catch (err) {
         console.error('[orchestrate] AGENT "' + agentKey + '" FAILED:', err.message);
-        return { agent: agentKey, provider: PROVIDER, output: null, ok: false, error: err.message };
+        return { agent: agentKey, provider: PROVIDER, output: null, ok: false, error: err.message, tokens: 0 };
       }
     })
   );
@@ -119,6 +134,35 @@ function buildSynthesisPrompt(originalGoal, successful) {
     'including the ``` fences and language tag — do not retype, reformat, or paraphrase code. Keep everything else ' +
     'in plain text with no markdown fences.\n\n' + synthesisInput
   );
+}
+
+// Core pipeline — reused by the HTTP route AND the background scheduler.
+// Returns { agents, agentTraces, responseText, usage }
+async function runOrchestration(query, options) {
+  const opts = options || {};
+  const usageTotals = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+
+  if (!isConfigured(PROVIDER)) {
+    const err = new Error('GROQ_API_KEY is missing from backend/.env');
+    err.code = 'NO_KEY';
+    throw err;
+  }
+
+  const effectiveQuery = query + (opts.memoryContext || '');
+
+  const { agents, agentTraces } = await planAndDelegate(effectiveQuery, !!opts.hasDocument, usageTotals);
+
+  const successful = agentTraces.filter((t) => t.ok && t.output);
+  if (successful.length === 0) {
+    const firstReason = (agentTraces.find((t) => !t.ok) || {}).error || 'unknown error';
+    throw new Error('All specialist agents failed to respond. First error: ' + firstReason);
+  }
+
+  const synthesisPrompt = buildSynthesisPrompt(effectiveQuery, successful);
+  const synthResult = await runProvider(PROVIDER, LEVEL, 'Synthesize the final answer now.', synthesisPrompt);
+  addUsage(usageTotals, synthResult.usage);
+
+  return { agents, agentTraces, responseText: synthResult.text.trim(), usage: usageTotals };
 }
 
 router.post('/', async (req, res) => {
@@ -158,6 +202,7 @@ router.post('/', async (req, res) => {
   let responseText = '';
   let usedFallback = false;
   let errorCode = null;
+  let tokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
 
   try {
     if (!isConfigured(PROVIDER)) {
@@ -171,33 +216,26 @@ router.post('/', async (req, res) => {
         'You are the Vision agent for NEXORA AI. Look at the attached image carefully and respond helpfully ' +
         'to the user\u2019s request about it. Be specific about what you actually see. Respond in plain text only, ' +
         'under 180 words, no markdown fences.' + memCtx;
-      const output = await runProvider(PROVIDER, LEVEL, trimmedQuery, visionPrompt, {
+      const result = await runProvider(PROVIDER, LEVEL, trimmedQuery, visionPrompt, {
         imageBase64: attachment.base64,
         imageMimeType: attachment.mimeType
       });
-      responseText = output.trim();
+      responseText = result.text.trim();
+      tokenUsage = result.usage;
       agents = ['content'];
-      agentTraces = [{ agent: 'content', provider: PROVIDER, ok: true, output: responseText }];
+      agentTraces = [{ agent: 'content', provider: PROVIDER, ok: true, output: responseText, tokens: result.usage.totalTokens }];
     } else {
-      const effectiveQuery =
-        (hasDocument
-          ? 'The user attached a document named "' + attachment.name + '". Document content:\n' +
-            (attachment.text ? attachment.text.slice(0, 6000) : '[No extractable text was found in this file]') +
-            '\n\nUser request: ' + (trimmedQuery || 'Summarize this document and highlight anything important.')
-          : trimmedQuery) + memCtx;
+      const docQuery = hasDocument
+        ? 'The user attached a document named "' + attachment.name + '". Document content:\n' +
+          (attachment.text ? attachment.text.slice(0, 6000) : '[No extractable text was found in this file]') +
+          '\n\nUser request: ' + (trimmedQuery || 'Summarize this document and highlight anything important.')
+        : trimmedQuery;
 
-      const { agents: planned, agentTraces: traces } = await planAndDelegate(effectiveQuery, hasDocument);
-      agents = planned;
-      agentTraces = traces;
-
-      const successful = agentTraces.filter((t) => t.ok && t.output);
-      if (successful.length === 0) {
-        const firstReason = (agentTraces.find((t) => !t.ok) || {}).error || 'unknown error';
-        throw new Error('All specialist agents failed to respond. First error: ' + firstReason);
-      }
-
-      const synthesisPrompt = buildSynthesisPrompt(effectiveQuery, successful);
-      responseText = (await runProvider(PROVIDER, LEVEL, 'Synthesize the final answer now.', synthesisPrompt)).trim();
+      const result = await runOrchestration(docQuery, { memoryContext: memCtx, hasDocument });
+      agents = result.agents;
+      agentTraces = result.agentTraces;
+      responseText = result.responseText;
+      tokenUsage = result.usage;
     }
   } catch (err) {
     console.error('[orchestrate] REQUEST FAILED:', err.message);
@@ -210,7 +248,7 @@ router.post('/', async (req, res) => {
         : "I couldn't complete this task right now (" + err.message + '). Please try again in a moment.';
   }
 
-  const savedTraces = agentTraces.map((t) => ({ agent: t.agent, provider: t.provider, ok: t.ok }));
+  const savedTraces = agentTraces.map((t) => ({ agent: t.agent, provider: t.provider, ok: t.ok, tokens: t.tokens || 0 }));
 
   convo.messages.push({
     role: 'assistant',
@@ -219,6 +257,7 @@ router.post('/', async (req, res) => {
     agentTraces: savedTraces,
     ok: !usedFallback,
     errorCode,
+    tokenUsage,
     time: new Date().toISOString()
   });
   convo.updatedAt = new Date().toISOString();
@@ -231,6 +270,7 @@ router.post('/', async (req, res) => {
     response: responseText,
     usedFallback,
     errorCode,
+    tokenUsage,
     conversation: convo
   });
 });
@@ -271,7 +311,7 @@ router.post('/stream', async (req, res) => {
   let agents = [];
   let agentTraces = [];
   let fullText = '';
-  let failed = false;
+  const usageTotals = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
 
   try {
     if (!isConfigured(PROVIDER)) {
@@ -281,11 +321,11 @@ router.post('/stream', async (req, res) => {
     }
 
     send({ type: 'stage', stage: 'planning' });
-    const { agents: planned, agentTraces: traces } = await planAndDelegate(trimmedQuery + memCtx, false);
-    agents = planned;
-    agentTraces = traces;
+    const planned = await planAndDelegate(trimmedQuery + memCtx, false, usageTotals);
+    agents = planned.agents;
+    agentTraces = planned.agentTraces;
 
-    const savedTraces = agentTraces.map((t) => ({ agent: t.agent, provider: t.provider, ok: t.ok }));
+    const savedTraces = agentTraces.map((t) => ({ agent: t.agent, provider: t.provider, ok: t.ok, tokens: t.tokens || 0 }));
     send({ type: 'agents', agents, agentTraces: savedTraces });
 
     const successful = agentTraces.filter((t) => t.ok && t.output);
@@ -308,6 +348,7 @@ router.post('/stream', async (req, res) => {
       agents,
       agentTraces: savedTraces,
       ok: true,
+      tokenUsage: usageTotals,
       time: new Date().toISOString()
     });
     convo.updatedAt = new Date().toISOString();
@@ -315,7 +356,6 @@ router.post('/stream', async (req, res) => {
 
     send({ type: 'done', conversationId: convo.id });
   } catch (err) {
-    failed = true;
     console.error('[orchestrate/stream] REQUEST FAILED:', err.message);
     const errorCode = err.code === 'NO_KEY' ? 'NO_KEY' : 'ERROR';
     const message =
@@ -327,7 +367,7 @@ router.post('/stream', async (req, res) => {
       role: 'assistant',
       content: message,
       agents,
-      agentTraces: agentTraces.map((t) => ({ agent: t.agent, provider: t.provider, ok: t.ok })),
+      agentTraces: agentTraces.map((t) => ({ agent: t.agent, provider: t.provider, ok: t.ok, tokens: t.tokens || 0 })),
       ok: false,
       errorCode,
       time: new Date().toISOString()
@@ -342,3 +382,4 @@ router.post('/stream', async (req, res) => {
 });
 
 module.exports = router;
+module.exports.runOrchestration = runOrchestration;

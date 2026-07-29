@@ -56,6 +56,7 @@ export const api = {
   streamOrchestrate,
 
   listConversations: () => request('/api/conversations'),
+  searchConversations: (q) => request('/api/conversations/search?q=' + encodeURIComponent(q)),
   getConversation: (id) => request('/api/conversations/' + id),
   createConversation: (title) => request('/api/conversations', { method: 'POST', body: JSON.stringify({ title }) }),
   deleteConversation: (id) => request('/api/conversations/' + id, { method: 'DELETE' }),
@@ -72,6 +73,11 @@ export const api = {
   getMemory: () => request('/api/memory'),
   addMemory: (note) => request('/api/memory', { method: 'POST', body: JSON.stringify({ note }) }),
   deleteMemory: (id) => request('/api/memory/' + id, { method: 'DELETE' }),
+
+  getSchedules: () => request('/api/schedules'),
+  addSchedule: (query, frequency) => request('/api/schedules', { method: 'POST', body: JSON.stringify({ query, frequency }) }),
+  toggleSchedule: (id, active) => request('/api/schedules/' + id, { method: 'PATCH', body: JSON.stringify({ active }) }),
+  deleteSchedule: (id) => request('/api/schedules/' + id, { method: 'DELETE' }),
 
   getProviders: () => request('/api/providers'),
   getAnalytics: () => request('/api/analytics'),

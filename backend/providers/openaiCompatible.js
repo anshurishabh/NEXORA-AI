@@ -1,6 +1,7 @@
 /**
  * Calls Groq's OpenAI-compatible /chat/completions endpoint.
- * Supports plain text, text + image (vision), and streaming responses.
+ * Now returns both the text AND token usage (prompt/completion/total),
+ * so the app can track cost/usage per agent.
  */
 async function callOpenAICompatible(endpoint, model, apiKey, query, systemPrompt, options) {
   const opts = options || {};
@@ -37,13 +38,18 @@ async function callOpenAICompatible(endpoint, model, apiKey, query, systemPrompt
 
   const content = data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
   if (!content) throw new Error('Provider returned an empty response');
-  return content;
+
+  const usage = data.usage || {};
+  return {
+    content,
+    usage: {
+      promptTokens: usage.prompt_tokens || 0,
+      completionTokens: usage.completion_tokens || 0,
+      totalTokens: usage.total_tokens || 0
+    }
+  };
 }
 
-/**
- * Same as above, but streams tokens as they're generated. Calls onToken(text)
- * for every small chunk of text Groq sends, so the UI can show a typing effect.
- */
 async function streamOpenAICompatible(endpoint, model, apiKey, query, systemPrompt, onToken) {
   const res = await fetch(endpoint, {
     method: 'POST',

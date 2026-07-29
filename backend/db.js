@@ -9,7 +9,7 @@ function ensureDB() {
     fs.mkdirSync(dir, { recursive: true });
   }
   if (!fs.existsSync(DB_PATH)) {
-    fs.writeFileSync(DB_PATH, JSON.stringify({ conversations: [], memory: [] }, null, 2));
+    fs.writeFileSync(DB_PATH, JSON.stringify({ conversations: [], memory: [], schedules: [] }, null, 2));
   }
 }
 
@@ -20,9 +20,10 @@ function readDB() {
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed.conversations)) parsed.conversations = [];
     if (!Array.isArray(parsed.memory)) parsed.memory = [];
+    if (!Array.isArray(parsed.schedules)) parsed.schedules = [];
     return parsed;
   } catch (err) {
-    return { conversations: [], memory: [] };
+    return { conversations: [], memory: [], schedules: [] };
   }
 }
 
