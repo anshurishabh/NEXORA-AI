@@ -13,6 +13,9 @@ export default function Analytics() {
   const entries = Object.entries(analytics.agentUsage || {}).sort((a, b) => b[1] - a[1]);
   const max = entries.length ? Math.max(...entries.map((e) => e[1])) : 1;
 
+  const tokenEntries = Object.entries(analytics.agentTokens || {}).sort((a, b) => b[1] - a[1]);
+  const tokenMax = tokenEntries.length ? Math.max(...tokenEntries.map((e) => e[1])) : 1;
+
   const daily = analytics.dailyActivity || [];
   const dailyMax = daily.length ? Math.max(1, ...daily.map((d) => d.count)) : 1;
 
@@ -31,6 +34,17 @@ export default function Analytics() {
             <div className="big">{analytics.successRate ?? 100}%</div>
             <div className="lbl">SUCCESS RATE</div>
           </div>
+          <div className="stat-card">
+            <div className="big">{(analytics.totalTokens || 0).toLocaleString('en-IN')}</div>
+            <div className="lbl">TOTAL TOKENS USED</div>
+          </div>
+          <div className="stat-card">
+            <div className="big">{analytics.avgTokensPerTask || 0}</div>
+            <div className="lbl">AVG TOKENS / TASK</div>
+          </div>
+        </div>
+
+        <div className="stat-grid">
           <div className="stat-card">
             <div className="big">{analytics.conversationCount || 0}</div>
             <div className="lbl">SAVED CHATS</div>
@@ -97,6 +111,23 @@ export default function Analytics() {
         </div>
 
         <div className="panel">
+          <h4>Token Usage by Agent</h4>
+          {tokenEntries.length === 0 ? (
+            <div className="empty-note">No token data yet — run a task to see usage here.</div>
+          ) : (
+            tokenEntries.map(([key, tokens]) => (
+              <div className="usage-row" key={key}>
+                <span className="name">{AGENT_CONFIG[key]?.label || key}</span>
+                <div className="usage-bar-track">
+                  <div className="usage-bar-fill" style={{ width: Math.round((tokens / tokenMax) * 100) + '%', background: 'linear-gradient(90deg,#e0a458,#c47f2e)' }}></div>
+                </div>
+                <span className="count">{tokens.toLocaleString('en-IN')}</span>
+              </div>
+            ))
+          )}
+        </div>
+
+        <div className="panel">
           <h4>Recent Activity</h4>
           {(analytics.activity || []).length === 0 ? (
             <div className="empty-note">Nothing logged yet.</div>
@@ -109,6 +140,7 @@ export default function Analytics() {
                   <span className={item.ok ? 'status-ok' : 'status-fail'} style={!item.ok ? { color: '#e0665f' } : undefined}>
                     {item.ok ? 'Verified' : 'Failed'}
                   </span>{' '}
+                  {item.tokens ? '· ' + item.tokens + ' tokens ' : ''}
                   · {new Date(item.time).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}
                 </span>
               </div>
